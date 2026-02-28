@@ -4,13 +4,16 @@ on:
   push:
     tags:
       - "v*"
+  workflow_dispatch:
 
 permissions:
   contents: write
 
 jobs:
   build-and-release:
-    runs-on: windows-latest
+    runs-on:
+      - self-hosted
+      - windows
 
     steps:
       - name: Checkout
@@ -20,6 +23,18 @@ jobs:
         uses: actions/setup-dotnet@v4
         with:
           dotnet-version: "10.0.x"
+
+      - name: Verify Dalamud install
+        shell: pwsh
+        run: |
+          if (-not $env:APPDATA) {
+            throw "APPDATA is not set on the runner."
+          }
+
+          $dalamudPath = Join-Path $env:APPDATA "XIVLauncher\\addon\\Hooks\\dev"
+          if (-not (Test-Path $dalamudPath)) {
+            throw "Dalamud dev path not found at $dalamudPath. Use a self-hosted Windows runner with XIVLauncher/Dalamud installed, or set DALAMUD_HOME to a valid Dalamud dev directory."
+          }
 
       - name: Build Release
         run: dotnet build Tsunippy.sln -c Release -clp:ErrorsOnly
@@ -36,4 +51,3 @@ jobs:
         with:
           files: bin/Release/latest.zip
           generate_release_notes: true
-
