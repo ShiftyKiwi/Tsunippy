@@ -1,0 +1,39 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.x"
+
+      - name: Build Release
+        run: dotnet build Tsunippy.sln -c Release -clp:ErrorsOnly
+
+      - name: Verify packaged zip
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "bin/Release/latest.zip")) {
+            throw "Expected release asset bin/Release/latest.zip was not produced."
+          }
+
+      - name: Publish GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: bin/Release/latest.zip
+          generate_release_notes: true
+
