@@ -76,15 +76,13 @@ namespace Tsunippy
 
                 default:
                     PrintEcho("Usage: /tsunippy <option>" +
-                        "\n  on / off / toggle — Enable or disable animation lock compensation." +
-                        "\n  dry — Toggle dry run (calculations only, no lock overrides)." +
-                        "\n  diag — Toggle the real-time diagnostics overlay." +
-                        "\n  (no args) — Open the configuration window.");
+                        "\n  on / off / toggle - Enable or disable animation lock compensation." +
+                        "\n  dry - Toggle dry run (calculations only, no lock overrides)." +
+                        "\n  diag - Toggle the real-time diagnostics overlay." +
+                        "\n  (no args) - Open the configuration window.");
                     break;
             }
         }
-
-        // ==================== Logging Helpers ====================
 
         public static void PrintEcho(string message) => DalamudApi.ChatGui.Print($"[Tsunippy] {message}");
         public static void PrintError(string message) => DalamudApi.ChatGui.PrintError($"[Tsunippy] {message}");
@@ -115,11 +113,7 @@ namespace Tsunippy
         /// <summary>Convert float seconds to integer milliseconds for display.</summary>
         public static int F2MS(float f) => (int)Math.Round(f * 1000);
 
-        // ==================== Framework ====================
-
         private static void Update(IFramework framework) => Game.Update();
-
-        // ==================== Disposal ====================
 
         protected virtual void Dispose(bool disposing)
         {

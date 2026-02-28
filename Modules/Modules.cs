@@ -16,9 +16,13 @@ namespace Tsunippy.Modules
 
         private static readonly Dictionary<Type, ModuleInfo> modules = new();
         private static IOrderedEnumerable<ModuleInfo> drawOrder;
+        private static bool isInitialized;
+        private static bool isDisposing;
 
         public static void Initialize()
         {
+            if (isInitialized) return;
+
             foreach (var t in Assembly.GetExecutingAssembly().GetTypes().Where(t => t.IsSubclassOf(typeof(Module)) && !t.IsAbstract))
             {
                 var module = (Module)Activator.CreateInstance(t);
@@ -34,6 +38,14 @@ namespace Tsunippy.Modules
                     catch (Exception e)
                     {
                         DalamudApi.LogError($"Failed loading module: {module.GetType()}\n{e}");
+                        try
+                        {
+                            module.Disable();
+                        }
+                        catch (Exception disableException)
+                        {
+                            DalamudApi.LogError($"Failed rolling back module: {module.GetType()}\n{disableException}");
+                        }
                         module.IsEnabled = false;
                     }
                 }
@@ -42,6 +54,7 @@ namespace Tsunippy.Modules
             }
 
             drawOrder = modules.Values.OrderBy(info => info.module.DrawOrder);
+            isInitialized = true;
         }
 
         public static Module GetInstance(Type type) => modules.TryGetValue(type, out var instance) ? instance.module : null;
@@ -50,6 +63,8 @@ namespace Tsunippy.Modules
 
         public static void CheckModules()
         {
+            if (!isInitialized || isDisposing) return;
+
             foreach (var (_, info) in modules)
             {
                 var module = info.module;
@@ -70,14 +85,41 @@ namespace Tsunippy.Modules
 
                     info.isEnabled = module.IsEnabled;
                 }
-                catch { module.IsEnabled = false; }
+                catch (Exception e)
+                {
+                    DalamudApi.LogError($"Module state transition failed: {module.GetType()}\n{e}");
+                    try
+                    {
+                        module.Disable();
+                    }
+                    catch (Exception disableException)
+                    {
+                        DalamudApi.LogError($"Module rollback failed: {module.GetType()}\n{disableException}");
+                    }
+
+                    module.IsEnabled = false;
+                    info.isEnabled = false;
+                }
             }
         }
 
         public static void Dispose()
         {
+            if (!isInitialized) return;
+
+            isDisposing = true;
             foreach (var (_, info) in modules.Where(kv => kv.Value.isEnabled))
-                info.module.Disable();
+            {
+                try
+                {
+                    info.module.Disable();
+                    info.isEnabled = false;
+                }
+                catch (Exception e)
+                {
+                    DalamudApi.LogError($"Failed disposing module: {info.module.GetType()}\n{e}");
+                }
+            }
         }
 
         public static void Draw()

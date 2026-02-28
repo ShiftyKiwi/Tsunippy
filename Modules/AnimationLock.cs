@@ -138,17 +138,12 @@ namespace Tsunippy.Modules
         /// Called when an action is used. Pre-applies the predicted animation lock
         /// immediately instead of waiting for the server response.
         /// </summary>
-        private unsafe void UseActionLocation(nint actionManager, uint actionType, uint actionID,
-            ulong targetedActorID, nint vectorLocation, uint param, byte ret)
+        private unsafe void ApplyPredictedLock(ActionType actionType, uint actionID)
         {
-            // Capture current packet state for RTT weight calculation
-            // (must be done here, before the server responds)
-            packetTracker.RecordPacket(0); // Also counted via NetworkMessage, this captures the action itself
-
             if (Game.actionManager->animationLock != Game.DefaultClientAnimationLock) return;
 
             // Resolve the canonical spell ID (handles job-specific action mapping)
-            var id = ActionManager.GetSpellIdForAction((ActionType)actionType, actionID);
+            var id = ActionManager.GetSpellIdForAction(actionType, actionID);
             var predictedLock = GetPredictedLock(id);
 
             if (!IsDryRunEnabled)
@@ -158,6 +153,21 @@ namespace Tsunippy.Modules
             }
 
             DalamudApi.LogDebug($"Applying {F2MS(predictedLock)} ms animation lock for {actionType} {actionID} ({id}), floor={F2MS(dynamicFloor.Floor)} ms");
+        }
+
+        private unsafe void UseAction(ActionManager* actionManager, ActionType actionType, uint actionID,
+            ulong targetId, uint extraParam, ActionManager.UseActionMode mode, uint comboRouteId,
+            bool* outOptAreaTargeted, bool ret)
+        {
+            if (!ret) return;
+            ApplyPredictedLock(actionType, actionID);
+        }
+
+        private unsafe void UseActionLocation(nint actionManager, uint actionType, uint actionID,
+            ulong targetedActorID, nint vectorLocation, uint param, byte ret)
+        {
+            if (ret == 0) return;
+            ApplyPredictedLock((ActionType)actionType, actionID);
         }
 
         private void CastBegin(ulong objectID, nint packetData) => isCasting = true;
@@ -225,8 +235,7 @@ namespace Tsunippy.Modules
                 var appliedLock = appliedAnimationLocks.GetValueOrDefault(sequence, 0.5f);
                 LastActionID = actionID;
 
-                if (sequence == Game.actionManager->currentSequence)
-                    appliedAnimationLocks.Clear();
+                appliedAnimationLocks.Remove(sequence);
 
                 // The lock we predicted from the database (without the floor buffer)
                 var currentFloor = dynamicFloor.Floor;
@@ -343,6 +352,7 @@ namespace Tsunippy.Modules
 
         public override unsafe void Enable()
         {
+            Game.OnUseAction += UseAction;
             Game.OnUseActionLocation += UseActionLocation;
             Game.OnCastBegin += CastBegin;
             Game.OnCastInterrupt += CastInterrupt;
@@ -353,6 +363,7 @@ namespace Tsunippy.Modules
 
         public override unsafe void Disable()
         {
+            Game.OnUseAction -= UseAction;
             Game.OnUseActionLocation -= UseActionLocation;
             Game.OnCastBegin -= CastBegin;
             Game.OnCastInterrupt -= CastInterrupt;

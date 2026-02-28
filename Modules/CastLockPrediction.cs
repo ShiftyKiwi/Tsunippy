@@ -64,6 +64,7 @@ namespace Tsunippy.Modules
         {
             isCasting = false;
             lockApplied = false;
+            castSequence = 0;
         }
 
         /// <summary>
@@ -106,10 +107,12 @@ namespace Tsunippy.Modules
         {
             if (!lockApplied) return;
             if (oldLock == newLock || (nint)casterPtr != DalamudApi.ObjectTable.LocalPlayer?.Address) return;
+            if (castSequence != 0 && header->SourceSequence != castSequence) return;
 
             // This is the server's response for our cast action
             lockApplied = false;
             isCasting = false;
+            castSequence = 0;
             LastActualCastLock = newLock;
 
             var animLockModule = global::Tsunippy.Modules.Modules.GetInstance<AnimationLock>();
@@ -119,7 +122,8 @@ namespace Tsunippy.Modules
             // If our prediction was accurate, oldLock should be close to our predicted lock
             // minus the RTT that elapsed. We just use the server's value plus any remaining
             // lock from our prediction window.
-            var adjustedLock = newLock + Math.Max(oldLock - LastPredictedCastLock, 0);
+            var remainingPredictedLock = Math.Min(Math.Max(oldLock, 0), LastPredictedCastLock);
+            var adjustedLock = newLock + remainingPredictedLock;
             if (float.IsFinite(adjustedLock) && adjustedLock < 10)
             {
                 Game.actionManager->animationLock = adjustedLock;

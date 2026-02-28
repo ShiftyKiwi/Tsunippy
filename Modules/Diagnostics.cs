@@ -39,14 +39,9 @@ namespace Tsunippy.Modules
 
         public override int DrawOrder => 10;
 
-        private void Update()
-        {
-            // Nothing to update per-frame; we read state from AnimationLock on draw
-        }
-
         private void DrawOverlay()
         {
-            if (!Config.DiagnosticsOverlay) return;
+            if (!Config.EnableDiagnostics || !Config.DiagnosticsOverlay) return;
 
             var animLock = global::Tsunippy.Modules.Modules.GetInstance<AnimationLock>();
             if (animLock == null) return;
@@ -116,6 +111,8 @@ namespace Tsunippy.Modules
             ImGui.End();
         }
 
+        public void DrawOverlayWindow() => DrawOverlay();
+
         private static void DrawStatRow(string label, string value, Vector4 valueColor)
         {
             ImGui.TextUnformatted($"  {label}:");
@@ -135,19 +132,7 @@ namespace Tsunippy.Modules
                 if (ImGui.Checkbox("Show Overlay", ref Config.DiagnosticsOverlay))
                     Config.Save();
                 PluginUI.SetItemTooltip("Opens a separate floating window with live diagnostics.");
-
-                DrawOverlay();
             }
-        }
-
-        public override void Enable()
-        {
-            Game.OnUpdate += Update;
-        }
-
-        public override void Disable()
-        {
-            Game.OnUpdate -= Update;
         }
     }
 }

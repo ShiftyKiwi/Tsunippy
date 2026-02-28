@@ -10,6 +10,10 @@ namespace Tsunippy
                 ImGui.SetTooltip(s);
         }
 
-        public static void Draw() => ConfigUI.Draw();
+        public static void Draw()
+        {
+            ConfigUI.Draw();
+            global::Tsunippy.Modules.Modules.GetInstance<global::Tsunippy.Modules.Diagnostics>()?.DrawOverlayWindow();
+        }
     }
 }
