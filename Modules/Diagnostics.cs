@@ -130,7 +130,7 @@ namespace Tsunippy.Modules
             {
                 ImGui.SameLine();
                 if (ImGui.Checkbox("Show Overlay", ref Config.DiagnosticsOverlay))
-                    Config.Save();
+                    Config.Save(checkModules: false);
                 PluginUI.SetItemTooltip("Opens a separate floating window with live diagnostics.");
             }
         }

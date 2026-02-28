@@ -8,9 +8,10 @@ namespace Tsunippy
 
         public void Initialize() { }
 
-        public void Save()
+        public void Save(bool checkModules = true)
         {
-            Modules.Modules.CheckModules();
+            if (checkModules)
+                Modules.Modules.CheckModules();
             DalamudApi.PluginInterface.SavePluginConfig(this);
         }
     }

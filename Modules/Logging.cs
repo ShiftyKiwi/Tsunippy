@@ -24,7 +24,7 @@ namespace Tsunippy.Modules
         public override void DrawConfig()
         {
             if (ImGui.Checkbox("Output to Chat Log", ref Tsunippy.Config.LogToChat))
-                Tsunippy.Config.Save();
+                Tsunippy.Config.Save(checkModules: false);
             PluginUI.SetItemTooltip("Sends logging to the chat log instead of the Dalamud log.");
 
             if (!Tsunippy.Config.LogToChat) return;
@@ -36,7 +36,7 @@ namespace Tsunippy.Modules
                     if (!ImGui.Selectable(chatType.ToString())) continue;
 
                     Tsunippy.Config.LogChatType = chatType;
-                    Tsunippy.Config.Save();
+                    Tsunippy.Config.Save(checkModules: false);
                 }
 
                 ImGui.EndCombo();

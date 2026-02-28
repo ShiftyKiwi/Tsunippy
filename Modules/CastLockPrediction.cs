@@ -164,7 +164,7 @@ namespace Tsunippy.Modules
                 if (ImGui.SliderFloat("Caster Tax (ms)", ref tax, 50f, 200f, "%.0f"))
                 {
                     Config.DefaultCasterTax = tax / 1000f;
-                    Config.Save();
+                    Config.Save(checkModules: false);
                 }
                 PluginUI.SetItemTooltip("The expected caster tax duration in milliseconds.\nDefault: 100ms (standard FFXIV caster tax).");
             }

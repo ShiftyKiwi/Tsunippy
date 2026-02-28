@@ -161,7 +161,7 @@ namespace Tsunippy.Modules
             if (Config.EnableEncounterStats)
             {
                 if (ImGui.Checkbox("Enable Stats Logging", ref Config.EnableEncounterStatsLogging))
-                    Config.Save();
+                    Config.Save(checkModules: false);
                 PluginUI.SetItemTooltip("Logs individual encounter clips and wasted GCD time.");
             }
 

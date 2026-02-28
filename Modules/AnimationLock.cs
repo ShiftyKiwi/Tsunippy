@@ -320,7 +320,11 @@ namespace Tsunippy.Modules
 
                 PrintLog(sb.ToString());
             }
-            catch { PrintError("Error in AnimationLock Module"); }
+            catch (Exception e)
+            {
+                DalamudApi.LogError($"AnimationLock.ReceiveActionEffect failed for action {LastActionID}: {e}");
+                PrintError("Error in AnimationLock Module. Check Dalamud logs for details.");
+            }
         }
 
         /// <summary>
@@ -340,7 +344,7 @@ namespace Tsunippy.Modules
             // Deferred config save — only writes to disk during zone transitions
             if (saveConfig && DalamudApi.Condition[ConditionFlag.BetweenAreas])
             {
-                Config.Save();
+                Config.Save(checkModules: false);
                 saveConfig = false;
             }
 
@@ -391,7 +395,7 @@ namespace Tsunippy.Modules
                 ImGui.Columns(2, "AnimlockColumns", false);
 
                 if (ImGui.Checkbox("Enable Logging", ref Config.EnableLogging))
-                    Config.Save();
+                    Config.Save(checkModules: false);
 
                 ImGui.NextColumn();
 
@@ -400,7 +404,7 @@ namespace Tsunippy.Modules
                 {
                     Config.EnableDryRun = dryRun;
                     enableAnticheat = false;
-                    Config.Save();
+                    Config.Save(checkModules: false);
                 }
                 PluginUI.SetItemTooltip("The plugin will still log and perform calculations,\nbut no in-game values will be overwritten.");
 
@@ -416,7 +420,7 @@ namespace Tsunippy.Modules
                     if (ImGui.SliderFloat("Alpha (SRTT smoothing)", ref alpha, 0.01f, 0.5f, "%.3f"))
                     {
                         Config.JKAlpha = alpha;
-                        Config.Save();
+                        Config.Save(checkModules: false);
                     }
                     PluginUI.SetItemTooltip("Controls how quickly the smoothed RTT adapts to new samples.\nLower = more stable, higher = more responsive.\nDefault: 0.125 (RFC 6298)");
 
@@ -424,7 +428,7 @@ namespace Tsunippy.Modules
                     if (ImGui.SliderFloat("Beta (Variance smoothing)", ref beta, 0.01f, 0.5f, "%.3f"))
                     {
                         Config.JKBeta = beta;
-                        Config.Save();
+                        Config.Save(checkModules: false);
                     }
                     PluginUI.SetItemTooltip("Controls how quickly the RTT variance adapts.\nLower = more stable variance, higher = more reactive to jitter.\nDefault: 0.25 (RFC 6298)");
 
@@ -432,7 +436,7 @@ namespace Tsunippy.Modules
                     if (ImGui.SliderFloat("K (Variance multiplier)", ref k, 0.5f, 4.0f, "%.1f"))
                     {
                         Config.JKK = k;
-                        Config.Save();
+                        Config.Save(checkModules: false);
                     }
                     PluginUI.SetItemTooltip("Multiplier on RTT variance for the safety buffer.\nHigher = more conservative (less clipping risk).\nLower = more aggressive (tighter locks).\nDefault: 2.0");
 
@@ -445,7 +449,7 @@ namespace Tsunippy.Modules
                     if (ImGui.SliderFloat("Floor Scaling", ref scaling, 0.5f, 1.0f, "%.2f"))
                     {
                         Config.DynamicFloorScaling = scaling;
-                        Config.Save();
+                        Config.Save(checkModules: false);
                     }
                     PluginUI.SetItemTooltip("Floor = MinRTT * ScalingFactor.\nLower = more aggressive (floor drops further below min RTT).\nHigher = more conservative.\nDefault: 0.85");
 
@@ -459,7 +463,7 @@ namespace Tsunippy.Modules
                         Config.DynamicFloorScaling = 0.85f;
                         rttEstimator.Reset();
                         dynamicFloor.Reset();
-                        Config.Save();
+                        Config.Save(checkModules: false);
                     }
 
                     ImGui.TreePop();

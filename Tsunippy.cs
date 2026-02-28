@@ -60,7 +60,7 @@ namespace Tsunippy
                 case "dry":
                 case "d":
                     PrintEcho($"Dry run is now {((Config.EnableDryRun = !Config.EnableDryRun) ? "enabled" : "disabled")}.");
-                    Config.Save();
+                    Config.Save(checkModules: false);
                     break;
 
                 case "diag":
@@ -119,7 +119,7 @@ namespace Tsunippy
         {
             if (!disposing) return;
 
-            Config.Save();
+            Config.Save(checkModules: false);
 
             DalamudApi.Framework.Update -= Update;
             DalamudApi.PluginInterface.UiBuilder.Draw -= PluginUI.Draw;
