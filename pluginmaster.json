@@ -1,25 +1,25 @@
 [
     {
-        "Author": "hocng015",
+        "Author": "Shifty Kiwi",
         "Name": "Tsunippy",
         "Punchline": "Next-gen animation lock compensation with adaptive RTT estimation.",
         "Description": "Reduces the effects of lag on animation locks, weaving, and cast actions. Features Jacobson/Karels RTT estimation, dynamic latency floor, cast lock prediction, context-aware lock database, and real-time diagnostics. An improved successor to NoClippy.",
-        "Changelog": "Initial release with 6 improvements over NoClippy: Jacobson/Karels RTT, dynamic floor, cast lock prediction, context-aware DB, graduated packet weight, diagnostics overlay.",
+        "Changelog": "Fixes action lock prediction for normal actions, corrects cast lock handling, detaches diagnostics overlay from config UI, and separates config saves from module reconciliation.",
         "InternalName": "Tsunippy",
-        "AssemblyVersion": "1.0.0.0",
-        "RepoUrl": "https://github.com/hocng015/Tsunippy",
+        "AssemblyVersion": "1.0.1.0",
+        "RepoUrl": "https://github.com/ShiftyKiwi/Tsunippy",
         "ApplicableVersion": "any",
         "Tags": ["jobs", "utility"],
         "CategoryTags": ["Jobs", "Utility"],
         "DalamudApiLevel": 14,
         "IconUrl": "",
         "ImageUrls": [],
-        "DownloadLinkInstall": "https://github.com/hocng015/Tsunippy/releases/download/v1.0.0/latest.zip",
-        "DownloadLinkUpdate": "https://github.com/hocng015/Tsunippy/releases/download/v1.0.0/latest.zip",
-        "DownloadLinkTesting": "https://github.com/hocng015/Tsunippy/releases/download/v1.0.0/latest.zip",
+        "DownloadLinkInstall": "https://github.com/ShiftyKiwi/Tsunippy/releases/download/v1.0.1/latest.zip",
+        "DownloadLinkUpdate": "https://github.com/ShiftyKiwi/Tsunippy/releases/download/v1.0.1/latest.zip",
+        "DownloadLinkTesting": "https://github.com/ShiftyKiwi/Tsunippy/releases/download/v1.0.1/latest.zip",
         "IsHide": false,
         "IsTestingExclusive": false,
         "DownloadCount": 0,
-        "LastUpdate": "1770390616"
+        "LastUpdate": "1772232795"
     }
 ]

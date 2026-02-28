@@ -1,12 +1,12 @@
 {
-  "Author": "Tsunippy",
+  "Author": "Shifty Kiwi",
   "Name": "Tsunippy",
   "Punchline": "Next-gen animation lock compensation with adaptive RTT estimation.",
   "Description": "Reduces the effects of lag on animation locks, weaving, and cast actions. Features adaptive RTT estimation, dynamic latency floor, cast lock prediction, and real-time diagnostics. An improved successor to NoClippy.",
   "Tags": ["jobs", "utility"],
   "CategoryTags": ["Jobs", "Utility"],
   "InternalName": "Tsunippy",
-  "AssemblyVersion": "1.0.0.0",
-  "RepoUrl": "",
+  "AssemblyVersion": "1.0.1.0",
+  "RepoUrl": "https://github.com/ShiftyKiwi/Tsunippy",
   "ApplicableVersion": "any"
 }
