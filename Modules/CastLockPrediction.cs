@@ -75,7 +75,7 @@ namespace Tsunippy.Modules
             if (!isCasting || lockApplied) return;
 
             var am = Game.actionManager;
-            if (!am->isCasting) return;
+            if (am->castActionId == 0) return;
 
             // Check if cast is about to complete (within one frame of finishing)
             var remaining = am->castTime - am->elapsedCastTime;

@@ -42,12 +42,12 @@ jobs:
       - name: Verify packaged zip
         shell: pwsh
         run: |
-          if (-not (Test-Path "bin/Release/latest.zip")) {
-            throw "Expected release asset bin/Release/latest.zip was not produced."
+          if (-not (Test-Path "bin/Release/Tsunippy/latest.zip")) {
+            throw "Expected release asset bin/Release/Tsunippy/latest.zip was not produced."
           }
 
       - name: Publish GitHub release
         uses: softprops/action-gh-release@v2
         with:
-          files: bin/Release/latest.zip
+          files: bin/Release/Tsunippy/latest.zip
           generate_release_notes: true

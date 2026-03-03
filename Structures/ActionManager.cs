@@ -1,4 +1,5 @@
 using System.Runtime.InteropServices;
+using FFXIVClientStructs.FFXIV.Client.Game;
 
 namespace Tsunippy.Structures
 {
@@ -6,7 +7,8 @@ namespace Tsunippy.Structures
     public struct ActionManager
     {
         [FieldOffset(0x8)] public float animationLock;
-        [FieldOffset(0x28)] public bool isCasting;
+        [FieldOffset(0x28)] public ActionType castActionType;
+        [FieldOffset(0x2C)] public uint castActionId;
         [FieldOffset(0x30)] public float elapsedCastTime;
         [FieldOffset(0x34)] public float castTime;
         [FieldOffset(0x60)] public float remainingComboTime;
