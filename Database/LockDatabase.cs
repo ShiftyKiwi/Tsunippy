@@ -23,8 +23,17 @@ namespace Tsunippy.Database
         /// <summary>The mean observed animation lock value in seconds.</summary>
         public float MeanLock { get; set; }
 
+        /// <summary>Mean absolute deviation of learned samples.</summary>
+        public float MeanDeviation { get; set; }
+
         /// <summary>Number of times this lock has been observed.</summary>
         public int SampleCount { get; set; }
+
+        /// <summary>Consecutive outliers seen against the current learned mean.</summary>
+        public int OutlierStreak { get; set; }
+
+        /// <summary>Unix timestamp of the last accepted sample.</summary>
+        public long LastObservedUnix { get; set; }
 
         /// <summary>
         /// Confidence level (0..1) based on sample count.
@@ -47,6 +56,11 @@ namespace Tsunippy.Database
     [Serializable]
     public class LockDatabase
     {
+        private const float MinimumLock = 0.5f;
+        private const float MaximumLock = 2.5f;
+        private const float MinimumOutlierWindow = 0.03f;
+        private const int ResetOutlierThreshold = 3;
+
         /// <summary>
         /// The database entries, keyed by "{actionID}_{contextByte}".
         /// String keys are used for JSON serialization compatibility.
@@ -70,7 +84,7 @@ namespace Tsunippy.Database
                 return defaultLock;
 
             // Sanity check: animation locks should never be below 0.5s
-            if (entry.MeanLock < 0.5f)
+            if (!float.IsFinite(entry.MeanLock) || entry.MeanLock < MinimumLock || entry.MeanLock > MaximumLock)
                 return defaultLock;
 
             // Require at least 30% confidence (3 samples) to use the learned value
@@ -87,20 +101,53 @@ namespace Tsunippy.Database
         /// <returns>True if this was a new or changed value, false if unchanged.</returns>
         public bool RecordLock(uint actionID, GameContext context, float lockValue)
         {
+            if (!float.IsFinite(lockValue) || lockValue < MinimumLock || lockValue > MaximumLock)
+                return false;
+
             var key = MakeKey(actionID, context);
+            var now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
 
             if (!Entries.TryGetValue(key, out var entry))
             {
                 // New entry
-                Entries[key] = new LockEntry { MeanLock = lockValue, SampleCount = 1 };
+                Entries[key] = new LockEntry
+                {
+                    MeanLock = lockValue,
+                    MeanDeviation = 0.01f,
+                    SampleCount = 1,
+                    LastObservedUnix = now,
+                };
                 return true;
             }
 
+            var delta = Math.Abs(entry.MeanLock - lockValue);
+            if (entry.SampleCount >= 3)
+            {
+                var allowedDrift = Math.Max(entry.MeanDeviation * 4f, MinimumOutlierWindow);
+                if (delta > allowedDrift)
+                {
+                    entry.OutlierStreak++;
+                    if (entry.OutlierStreak < ResetOutlierThreshold)
+                        return false;
+
+                    // Repeated outliers likely indicate a real shift after a patch or balance change.
+                    entry.MeanLock = lockValue;
+                    entry.MeanDeviation = 0.01f;
+                    entry.SampleCount = Math.Min(entry.SampleCount, 3);
+                    entry.OutlierStreak = 0;
+                    entry.LastObservedUnix = now;
+                    return true;
+                }
+            }
+
+            entry.OutlierStreak = 0;
+
             // Same value — just bump count for confidence
-            if (Math.Abs(entry.MeanLock - lockValue) < 0.0001f)
+            if (delta < 0.0001f)
             {
                 if (entry.SampleCount < 1000)
                     entry.SampleCount++;
+                entry.LastObservedUnix = now;
                 return false;
             }
 
@@ -108,6 +155,8 @@ namespace Tsunippy.Database
             // Cap at 1000 samples so the mean can eventually adapt to game patches
             entry.SampleCount = Math.Min(entry.SampleCount + 1, 1000);
             entry.MeanLock += (lockValue - entry.MeanLock) / entry.SampleCount;
+            entry.MeanDeviation += (delta - entry.MeanDeviation) / entry.SampleCount;
+            entry.LastObservedUnix = now;
             return true;
         }
 
@@ -128,5 +177,7 @@ namespace Tsunippy.Database
             var key = MakeKey(actionID, context);
             return Entries.TryGetValue(key, out var entry) ? entry : null;
         }
+
+        public void Reset() => Entries.Clear();
     }
 }

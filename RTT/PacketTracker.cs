@@ -17,10 +17,15 @@ namespace Tsunippy.RTT
         // Rolling window: 5 slots x 10ms = 50ms
         private const int SlotCount = 5;
         private const float SlotDuration = 0.01f; // 10ms per slot
+        private const float DefaultActionWindow = 0.12f;
+        private const int DefaultActionBudget = 2;
 
         private readonly int[] totalPackets = new int[SlotCount];
+        private readonly int[] actionPackets = new int[SlotCount];
         private int currentIndex = 0;
         private float timer = 0f;
+        private float actionWindowRemaining = 0f;
+        private int actionPacketBudget = 0;
 
         /// <summary>Total packets sent in the last 50ms window.</summary>
         public int TotalPacketsSent
@@ -33,6 +38,17 @@ namespace Tsunippy.RTT
             }
         }
 
+        /// <summary>Packets likely related to actions in the last 50ms window.</summary>
+        public int ActionPacketsSent
+        {
+            get
+            {
+                int s = 0;
+                for (int i = 0; i < SlotCount; i++) s += actionPackets[i];
+                return s;
+            }
+        }
+
         /// <summary>
         /// Record an outgoing packet.
         /// </summary>
@@ -40,6 +56,22 @@ namespace Tsunippy.RTT
         public unsafe void RecordPacket(nint packet)
         {
             totalPackets[currentIndex]++;
+
+            if (actionWindowRemaining <= 0 || actionPacketBudget <= 0)
+                return;
+
+            actionPackets[currentIndex]++;
+            actionPacketBudget--;
+        }
+
+        /// <summary>
+        /// Mark the next short burst of outgoing packets as action-related.
+        /// This is a heuristic window rather than a fragile packet parser.
+        /// </summary>
+        public void MarkActionIssued(int budget = DefaultActionBudget, float windowSeconds = DefaultActionWindow)
+        {
+            actionPacketBudget = Math.Max(actionPacketBudget, budget);
+            actionWindowRemaining = Math.Max(actionWindowRemaining, windowSeconds);
         }
 
         /// <summary>
@@ -50,11 +82,13 @@ namespace Tsunippy.RTT
         public void Update(float deltaTime)
         {
             timer += deltaTime;
+            actionWindowRemaining = Math.Max(actionWindowRemaining - deltaTime, 0f);
             while (timer >= SlotDuration)
             {
                 timer -= SlotDuration;
                 currentIndex = (currentIndex + 1) % SlotCount;
                 totalPackets[currentIndex] = 0;
+                actionPackets[currentIndex] = 0;
             }
         }
 
@@ -73,7 +107,7 @@ namespace Tsunippy.RTT
         /// </summary>
         public float GetRTTWeight()
         {
-            var sent = TotalPacketsSent;
+            var sent = ActionPacketsSent > 0 ? ActionPacketsSent : TotalPacketsSent;
             return sent switch
             {
                 <= 1 => 1.0f,
@@ -87,8 +121,11 @@ namespace Tsunippy.RTT
         public void Reset()
         {
             Array.Clear(totalPackets);
+            Array.Clear(actionPackets);
             currentIndex = 0;
             timer = 0f;
+            actionWindowRemaining = 0f;
+            actionPacketBudget = 0;
         }
     }
 }

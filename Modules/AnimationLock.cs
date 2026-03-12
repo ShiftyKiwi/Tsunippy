@@ -2,8 +2,8 @@ using System;
 using System.Collections.Generic;
 using System.Numerics;
 using System.Text;
-using Dalamud.Game.ClientState.Conditions;
 using Dalamud.Bindings.ImGui;
+using Dalamud.Game.ClientState.Conditions;
 using FFXIVClientStructs.FFXIV.Client.Game;
 using FFXIVClientStructs.FFXIV.Client.Game.Character;
 using FFXIVClientStructs.FFXIV.Client.Game.Object;
@@ -18,6 +18,7 @@ namespace Tsunippy
         public bool EnableAnimLockComp = true;
         public bool EnableLogging = false;
         public bool EnableDryRun = false;
+        public bool LearnAnimationLocks = true;
 
         // Jacobson/Karels tuning parameters
         public float JKAlpha = 0.125f;
@@ -41,31 +42,6 @@ namespace Tsunippy.Modules
 {
     public class AnimationLock : Module
     {
-        // ==================== ARCHITECTURE NOTES ====================
-        // This module is the core of Tsunippy. It improves on NoClippy's AnimationLock with:
-        //
-        // 1. Jacobson/Karels RTT estimator (RFC 6298) instead of simple EWMA
-        //    - Separately tracks smoothed RTT and RTT variance
-        //    - PredictedBuffer = SRTT + K*RTTVAR provides dynamic network buffering
-        //    - Tight on stable connections, expands during jitter
-        //
-        // 2. Dynamic RTT floor instead of hardcoded 40ms
-        //    - Tracks minimum observed RTT over a sliding window
-        //    - Floor = MinRTT * 0.85 (adapts per-datacenter, per-time-of-day)
-        //    - Falls back to 40ms until sufficient samples collected
-        //
-        // 3. Graduated packet weight (1.0/0.5/0.25/0.1) instead of binary (1.0/0.1)
-        //    - More nuanced spike handling for multi-packet bursts
-        //
-        // 4. Context-aware lock database keyed by (actionID, PvE/PvP)
-        //    - Confidence tracking per entry
-        //    - PvP and PvE locks stored separately
-        //
-        // The overall flow remains the same as NoClippy:
-        //   Action used -> Pre-apply predicted lock -> Server responds -> Correct lock
-        // But every component in the correction pipeline is upgraded.
-        // ============================================================
-
         public override bool IsEnabled
         {
             get => Config.EnableAnimLockComp;
@@ -74,18 +50,21 @@ namespace Tsunippy.Modules
 
         public override int DrawOrder => 1;
 
-        // RTT infrastructure (Tsunippy improvements)
         private readonly JacobsonKarels rttEstimator = new();
         private readonly DynamicFloor dynamicFloor;
         private readonly PacketTracker packetTracker = new();
 
-        // State tracking (same pattern as NoClippy)
-        private bool isCasting = false;
-        private bool enableAnticheat = false;
-        private bool saveConfig = false;
+        private bool isCasting;
+        private bool enableAnticheat;
+        private bool saveConfig;
+        private bool wasInCombat;
+        private float saveConfigTimer;
+        private int pendingLearnedEntries;
         private readonly Dictionary<ushort, float> appliedAnimationLocks = new();
 
-        // Diagnostics state (exposed for Diagnostics module)
+        private const float SaveFlushInterval = 30f;
+        private const int SaveFlushBatchSize = 8;
+
         public float LastRTT { get; private set; }
         public float LastCorrection { get; private set; }
         public float LastVarianceBuffer { get; private set; }
@@ -97,7 +76,9 @@ namespace Tsunippy.Modules
         public int FloorSampleCount => dynamicFloor.CurrentSampleCount;
         public int RTTSampleCount => rttEstimator.SampleCount;
         public int PacketsSent => packetTracker.TotalPacketsSent;
-
+        public int ActionPacketsSent => packetTracker.ActionPacketsSent;
+        public int PendingLearnedEntries => pendingLearnedEntries;
+        public bool ConflictDetected => enableAnticheat;
         public bool IsDryRunEnabled => enableAnticheat || Config.EnableDryRun;
 
         public AnimationLock()
@@ -105,13 +86,6 @@ namespace Tsunippy.Modules
             dynamicFloor = new DynamicFloor(Config.DynamicFloorWindow);
         }
 
-        // ==================== Lock Prediction ====================
-
-        /// <summary>
-        /// Get the predicted animation lock for an action.
-        /// Uses the context-aware database + dynamic floor instead of NoClippy's
-        /// hardcoded dictionary + 40ms constant.
-        /// </summary>
         private float GetPredictedLock(uint actionID)
         {
             var context = GetCurrentContext();
@@ -119,7 +93,6 @@ namespace Tsunippy.Modules
             return baseLock + dynamicFloor.Floor;
         }
 
-        /// <summary>Detect current game context (PvE vs PvP).</summary>
         private static GameContext GetCurrentContext()
         {
             try
@@ -132,17 +105,11 @@ namespace Tsunippy.Modules
             }
         }
 
-        // ==================== Hook Handlers ====================
-
-        /// <summary>
-        /// Called when an action is used. Pre-applies the predicted animation lock
-        /// immediately instead of waiting for the server response.
-        /// </summary>
         private unsafe void ApplyPredictedLock(ActionType actionType, uint actionID)
         {
-            if (Game.actionManager->animationLock != Game.DefaultClientAnimationLock) return;
+            if (Game.actionManager->animationLock != Game.DefaultClientAnimationLock)
+                return;
 
-            // Resolve the canonical spell ID (handles job-specific action mapping)
             var id = ActionManager.GetSpellIdForAction(actionType, actionID);
             var predictedLock = GetPredictedLock(id);
 
@@ -152,6 +119,7 @@ namespace Tsunippy.Modules
                 appliedAnimationLocks[Game.actionManager->currentSequence] = predictedLock;
             }
 
+            packetTracker.MarkActionIssued();
             DalamudApi.LogDebug($"Applying {F2MS(predictedLock)} ms animation lock for {actionType} {actionID} ({id}), floor={F2MS(dynamicFloor.Floor)} ms");
         }
 
@@ -159,31 +127,27 @@ namespace Tsunippy.Modules
             ulong targetId, uint extraParam, ActionManager.UseActionMode mode, uint comboRouteId,
             bool* outOptAreaTargeted, bool ret)
         {
-            if (!ret) return;
+            if (!ret)
+                return;
+
             ApplyPredictedLock(actionType, actionID);
         }
 
         private unsafe void UseActionLocation(nint actionManager, uint actionType, uint actionID,
             ulong targetedActorID, nint vectorLocation, uint param, byte ret)
         {
-            if (ret == 0) return;
+            if (ret == 0)
+                return;
+
             ApplyPredictedLock((ActionType)actionType, actionID);
         }
 
-        private void CastBegin(ulong objectID, nint packetData) => isCasting = true;
-        private void CastInterrupt(nint actionManager) => isCasting = false;
+        private void CastBegin(ulong objectID, nint packetData)
+            => isCasting = true;
 
-        /// <summary>
-        /// Called when the server sends an action effect response.
-        /// This is where the core correction logic lives.
-        ///
-        /// The key insight: by the time the server responds, the predicted lock has been
-        /// counting down for exactly RTT seconds. So:
-        ///   actualRTT = appliedLock - oldLock
-        ///   correction = serverLock - predictedBaseLock
-        ///   varianceBuffer = K * RTTVAR (from Jacobson/Karels)
-        ///   adjustedLock = oldLock + correction + varianceBuffer
-        /// </summary>
+        private void CastInterrupt(nint actionManager)
+            => isCasting = false;
+
         private unsafe void ReceiveActionEffect(uint casterEntityId, Character* casterPtr,
             Vector3* targetPos, ActionEffectHandler.Header* header,
             ActionEffectHandler.TargetEffects* effects, GameObjectId* targetEntityIds,
@@ -191,37 +155,29 @@ namespace Tsunippy.Modules
         {
             try
             {
-                // Skip if lock didn't change or not local player
-                if (oldLock == newLock || (nint)casterPtr != DalamudApi.ObjectTable.LocalPlayer?.Address) return;
+                if (oldLock == newLock || (nint)casterPtr != DalamudApi.ObjectTable.LocalPlayer?.Address)
+                    return;
 
-                // ---- Cast lock handling ----
-                // Cast actions (caster tax, teleport, LB) are handled differently.
-                // The CastLockPrediction module handles pre-application for these.
-                // Here we just do the basic NoClippy-style handling as a fallback.
                 if (isCasting)
                 {
                     isCasting = false;
-
-                    // The old lock should always be 0 at cast completion, but high ping
-                    // can cause the packet to arrive late. Add any remaining lock.
                     newLock += oldLock;
+
                     if (!IsDryRunEnabled)
                         Game.actionManager->animationLock = newLock;
 
                     if (Config.EnableLogging)
                         PrintLog($"Cast Lock: {F2MS(newLock)} ms (+{F2MS(oldLock)})");
+
                     return;
                 }
 
-                // ---- Mismatch detection ----
                 if (newLock != header->AnimationLock)
                 {
                     PrintError("Mismatched animation lock offset! This can be caused by another plugin affecting the animation lock.");
                     return;
                 }
 
-                // ---- XivAlexander conflict detection ----
-                // Alexander adjusts locks to fractional ms values the game never produces naturally.
                 var isUsingAlexander = newLock % 0.01 is >= 0.0005f and <= 0.0095f;
                 if (!enableAnticheat && isUsingAlexander)
                 {
@@ -229,68 +185,51 @@ namespace Tsunippy.Modules
                     PrintError($"Unexpected lock of {F2MS(newLock)} ms, temporary dry run has been enabled. Please disable any other programs or plugins that may be affecting the animation lock.");
                 }
 
-                // ---- Retrieve prediction state ----
                 var sequence = header->SourceSequence;
                 var actionID = header->SpellId;
-                var appliedLock = appliedAnimationLocks.GetValueOrDefault(sequence, 0.5f);
+                var appliedLock = appliedAnimationLocks.GetValueOrDefault(sequence, Game.DefaultClientAnimationLock);
                 LastActionID = actionID;
 
                 appliedAnimationLocks.Remove(sequence);
 
-                // The lock we predicted from the database (without the floor buffer)
                 var currentFloor = dynamicFloor.Floor;
                 var lastRecordedLock = IsDryRunEnabled ? newLock : appliedLock - currentFloor;
 
-                // ---- Update lock database ----
                 var context = GetCurrentContext();
-                if (!enableAnticheat)
-                    Config.LockDb.RecordLock(actionID, context, newLock);
+                if (!enableAnticheat && Config.LearnAnimationLocks && Config.LockDb.RecordLock(actionID, context, newLock))
+                    MarkLearnedDataDirty();
 
-                // ---- Compute RTT ----
-                // appliedLock was set at action use time, oldLock is what remains.
-                // The difference is exactly how long the round trip took.
                 var correction = newLock - lastRecordedLock;
                 var rtt = appliedLock - oldLock;
                 LastRTT = rtt;
 
-                // ---- Feed RTT to infrastructure ----
                 dynamicFloor.AddSample(rtt);
-
-                // Check if RTT is already below the dynamic floor (no adjustment needed)
                 if (rtt <= currentFloor)
                 {
                     if (Config.EnableLogging)
                         PrintLog($"RTT ({F2MS(rtt)} ms) was lower than floor ({F2MS(currentFloor)} ms), no adjustments made");
+
                     LastCorrection = 0;
                     LastVarianceBuffer = 0;
                     LastAdjustedLock = newLock;
                     return;
                 }
 
-                // ---- Jacobson/Karels RTT update ----
                 var weight = packetTracker.GetRTTWeight();
                 rttEstimator.AddSample(rtt, weight);
 
-                // Sync estimator parameters from config (allows live tuning)
                 rttEstimator.Alpha = Config.JKAlpha;
                 rttEstimator.Beta = Config.JKBeta;
                 rttEstimator.K = Config.JKK;
                 dynamicFloor.ScalingFactor = Config.DynamicFloorScaling;
 
-                // ---- Compute variance buffer ----
-                // This replaces NoClippy's `simulatedRTT * (max(rtt/average, 1) - 1)` formula.
-                // Instead we use the Jacobson/Karels variance component: K * RTTVAR.
-                // This is more principled: on stable connections RTTVAR is small (tight locks),
-                // on jittery connections RTTVAR is large (safe buffer).
                 var varianceBuffer = rttEstimator.VarianceBuffer;
                 LastVarianceBuffer = varianceBuffer;
                 LastCorrection = correction;
 
-                // ---- Final lock calculation ----
                 var adjustedAnimationLock = Math.Max(oldLock + correction + varianceBuffer, 0);
                 LastAdjustedLock = (float)adjustedAnimationLock;
 
-                // ---- Write to game memory ----
                 if (!IsDryRunEnabled && float.IsFinite((float)adjustedAnimationLock) && adjustedAnimationLock < 10)
                 {
                     Game.actionManager->animationLock = (float)adjustedAnimationLock;
@@ -302,22 +241,23 @@ namespace Tsunippy.Modules
                         saveConfig = true;
                 }
 
-                // ---- Logging ----
-                if (!Config.EnableLogging) return;
+                if (!Config.EnableLogging)
+                    return;
 
                 var sb = new StringBuilder(IsDryRunEnabled ? "[DRY] " : string.Empty)
                     .Append($"Action: {actionID} ")
-                    .Append(lastRecordedLock != newLock ? $"({F2MS((float)lastRecordedLock)} > {F2MS(newLock)} ms)" : $"({F2MS(newLock)} ms)")
+                    .Append(lastRecordedLock != newLock
+                        ? $"({F2MS((float)lastRecordedLock)} > {F2MS(newLock)} ms)"
+                        : $"({F2MS(newLock)} ms)")
                     .Append($" || RTT: {F2MS(rtt)} ms (SRTT: {F2MS(rttEstimator.SmoothedRTT)}, VAR: {F2MS(rttEstimator.RTTVariance)})");
 
                 if (enableAnticheat)
-                    sb.Append($" [Alexander detected]");
+                    sb.Append(" [Alexander detected]");
 
                 if (!IsDryRunEnabled)
                     sb.Append($" || Lock: {F2MS(oldLock)} > {F2MS((float)adjustedAnimationLock)} ({F2MS((float)(correction + varianceBuffer)):+0;-#}) ms");
 
-                sb.Append($" || Floor: {F2MS(dynamicFloor.Floor)} ms | Wt: {weight:F2} | Pkts: {packetTracker.TotalPacketsSent}");
-
+                sb.Append($" || Floor: {F2MS(dynamicFloor.Floor)} ms | Wt: {weight:F2} | Pkts: {packetTracker.TotalPacketsSent}/{packetTracker.ActionPacketsSent}");
                 PrintLog(sb.ToString());
             }
             catch (Exception e)
@@ -327,32 +267,26 @@ namespace Tsunippy.Modules
             }
         }
 
-        /// <summary>
-        /// Called for every outgoing network packet.
-        /// Feeds the packet tracker for RTT weight calculation.
-        /// </summary>
         private void NetworkMessage(nint packet)
         {
             packetTracker.RecordPacket(packet);
         }
 
-        /// <summary>
-        /// Called every frame. Advances the packet tracker window and handles deferred saves.
-        /// </summary>
         private void Update()
         {
-            // Deferred config save — only writes to disk during zone transitions
-            if (saveConfig && DalamudApi.Condition[ConditionFlag.BetweenAreas])
+            saveConfigTimer += (float)DalamudApi.Framework.UpdateDelta.TotalSeconds;
+            var inCombat = DalamudApi.Condition[ConditionFlag.InCombat];
+
+            if (saveConfig && (DalamudApi.Condition[ConditionFlag.BetweenAreas]
+                || (!inCombat && (!wasInCombat || pendingLearnedEntries >= SaveFlushBatchSize || saveConfigTimer >= SaveFlushInterval))))
             {
                 Config.Save(checkModules: false);
-                saveConfig = false;
+                ResetDirtySaveState();
             }
 
-            // Advance the packet counting window
             packetTracker.Update((float)DalamudApi.Framework.UpdateDelta.TotalSeconds);
+            wasInCombat = inCombat;
         }
-
-        // ==================== Module Lifecycle ====================
 
         public override unsafe void Enable()
         {
@@ -375,8 +309,6 @@ namespace Tsunippy.Modules
             Game.OnUpdate -= Update;
             Game.OnNetworkMessageDelegate -= NetworkMessage;
         }
-
-        // ==================== Config UI ====================
 
         public override void DrawConfig()
         {
@@ -410,7 +342,10 @@ namespace Tsunippy.Modules
 
                 ImGui.Columns(1);
 
-                // Advanced RTT settings (collapsible)
+                if (ImGui.Checkbox("Learn Animation Locks", ref Config.LearnAnimationLocks))
+                    Config.Save(checkModules: false);
+                PluginUI.SetItemTooltip("Learns per-action lock values from live server responses.\nDisable this if you want to freeze the current learned database.");
+
                 if (ImGui.TreeNode("Advanced RTT Settings"))
                 {
                     ImGui.TextUnformatted("Jacobson/Karels Parameters");
@@ -466,11 +401,38 @@ namespace Tsunippy.Modules
                         Config.Save(checkModules: false);
                     }
 
+                    ImGui.SameLine();
+                    if (ImGui.Button("Reset Learned Locks"))
+                    {
+                        Config.LockDb.Reset();
+                        Config.Save(checkModules: false);
+                    }
+                    PluginUI.SetItemTooltip("Clears the learned per-action lock database.");
+
                     ImGui.TreePop();
                 }
             }
 
             ImGui.TextUnformatted($"Reduced a total time of {TimeSpan.FromSeconds(Config.TotalAnimationLockReduction):d\\:hh\\:mm\\:ss} from {Config.TotalActionsReduced} actions");
+        }
+
+        private void MarkLearnedDataDirty()
+        {
+            saveConfig = true;
+            saveConfigTimer = 0f;
+            pendingLearnedEntries++;
+        }
+
+        private void ResetDirtySaveState()
+        {
+            saveConfig = false;
+            saveConfigTimer = 0f;
+            pendingLearnedEntries = 0;
+        }
+
+        public void NotifyLearnedDataChanged()
+        {
+            MarkLearnedDataDirty();
         }
     }
 }

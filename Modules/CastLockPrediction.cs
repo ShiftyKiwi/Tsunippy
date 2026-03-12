@@ -4,6 +4,7 @@ using Dalamud.Bindings.ImGui;
 using FFXIVClientStructs.FFXIV.Client.Game;
 using FFXIVClientStructs.FFXIV.Client.Game.Character;
 using FFXIVClientStructs.FFXIV.Client.Game.Object;
+using Tsunippy.Database;
 using static Tsunippy.Tsunippy;
 
 namespace Tsunippy
@@ -12,6 +13,8 @@ namespace Tsunippy
     {
         public bool EnableCastLockPrediction = true;
         public float DefaultCasterTax = 0.1f;
+        public bool LearnCastTax = true;
+        public CastTaxDatabase CastTaxDb = new();
     }
 }
 
@@ -45,6 +48,8 @@ namespace Tsunippy.Modules
         private bool isCasting = false;
         private bool lockApplied = false;
         private ushort castSequence = 0;
+        private uint castActionId = 0;
+        private GameContext castContext = GameContext.PvE;
 
         // Diagnostics
         public float LastPredictedCastLock { get; private set; }
@@ -57,7 +62,9 @@ namespace Tsunippy.Modules
             unsafe
             {
                 castSequence = Game.actionManager->currentSequence;
+                castActionId = Game.actionManager->castActionId;
             }
+            castContext = DalamudApi.ClientState.IsPvP ? GameContext.PvP : GameContext.PvE;
         }
 
         private void CastInterrupt(nint actionManager)
@@ -65,6 +72,7 @@ namespace Tsunippy.Modules
             isCasting = false;
             lockApplied = false;
             castSequence = 0;
+            castActionId = 0;
         }
 
         /// <summary>
@@ -84,7 +92,10 @@ namespace Tsunippy.Modules
             // Pre-apply the caster tax lock
             var animLockModule = global::Tsunippy.Modules.Modules.GetInstance<AnimationLock>();
             var floor = animLockModule?.CurrentFloor ?? global::Tsunippy.RTT.DynamicFloor.DefaultFloor;
-            var predictedLock = Config.DefaultCasterTax + floor;
+            var learnedTax = Config.LearnCastTax
+                ? Config.CastTaxDb.GetTax(castActionId, castContext, Config.DefaultCasterTax)
+                : Config.DefaultCasterTax;
+            var predictedLock = learnedTax + floor;
 
             if (!animLockModule?.IsDryRunEnabled ?? true)
             {
@@ -116,6 +127,14 @@ namespace Tsunippy.Modules
             LastActualCastLock = newLock;
 
             var animLockModule = global::Tsunippy.Modules.Modules.GetInstance<AnimationLock>();
+            if (Config.LearnCastTax && !(animLockModule?.ConflictDetected ?? false))
+            {
+                var actionId = castActionId != 0 ? castActionId : header->SpellId;
+                if (Config.CastTaxDb.RecordTax(actionId, castContext, newLock))
+                    animLockModule?.NotifyLearnedDataChanged();
+            }
+
+            castActionId = 0;
             if (animLockModule?.IsDryRunEnabled ?? true) return;
 
             // The server's lock replaces ours. oldLock is what remains of our prediction.
@@ -167,6 +186,16 @@ namespace Tsunippy.Modules
                     Config.Save(checkModules: false);
                 }
                 PluginUI.SetItemTooltip("The expected caster tax duration in milliseconds.\nDefault: 100ms (standard FFXIV caster tax).");
+
+                if (ImGui.Checkbox("Learn Cast Tax", ref Config.LearnCastTax))
+                    Config.Save(checkModules: false);
+                PluginUI.SetItemTooltip("Learns cast-tax values per action instead of relying only on the global default.");
+
+                if (ImGui.Button("Reset Learned Cast Tax"))
+                {
+                    Config.CastTaxDb.Reset();
+                    Config.Save(checkModules: false);
+                }
             }
         }
     }

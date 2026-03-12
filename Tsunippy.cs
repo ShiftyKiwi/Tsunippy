@@ -10,10 +10,18 @@ namespace Tsunippy
         public static Tsunippy Plugin { get; private set; }
         public static Configuration Config { get; private set; }
 
+        private bool frameworkSubscribed;
+        private bool uiDrawSubscribed;
+        private bool configUiSubscribed;
+        private bool modulesInitialized;
+        private bool gameInitialized;
+        private bool dalamudInitialized;
+
         public Tsunippy(IDalamudPluginInterface pluginInterface)
         {
             Plugin = this;
             DalamudApi.Initialize(this, pluginInterface);
+            dalamudInitialized = true;
 
             Config = (Configuration)DalamudApi.PluginInterface.GetPluginConfig() ?? new();
             Config.Initialize();
@@ -21,17 +29,24 @@ namespace Tsunippy
             try
             {
                 Game.Initialize();
+                gameInitialized = true;
 
                 DalamudApi.Framework.Update += Update;
+                frameworkSubscribed = true;
                 DalamudApi.PluginInterface.UiBuilder.Draw += PluginUI.Draw;
+                uiDrawSubscribed = true;
                 DalamudApi.PluginInterface.UiBuilder.OpenConfigUi += ConfigUI.ToggleVisible;
+                configUiSubscribed = true;
 
                 Modules.Modules.Initialize();
+                modulesInitialized = true;
             }
             catch (Exception e)
             {
                 PrintError("Failed to load!");
                 DalamudApi.LogError(e.ToString());
+                DalamudApi.ShowNotification("Tsunippy failed to initialize and rolled back its startup state.", Dalamud.Interface.ImGuiNotification.NotificationType.Error);
+                RollbackStartup();
             }
         }
 
@@ -120,21 +135,52 @@ namespace Tsunippy
             if (!disposing) return;
 
             Config.Save(checkModules: false);
-
-            DalamudApi.Framework.Update -= Update;
-            DalamudApi.PluginInterface.UiBuilder.Draw -= PluginUI.Draw;
-            DalamudApi.PluginInterface.UiBuilder.OpenConfigUi -= ConfigUI.ToggleVisible;
-
-            Modules.Modules.Dispose();
-            Game.Dispose();
-
-            DalamudApi.Dispose();
+            RollbackStartup();
         }
 
         public void Dispose()
         {
             Dispose(true);
             GC.SuppressFinalize(this);
+        }
+
+        private void RollbackStartup()
+        {
+            if (frameworkSubscribed)
+            {
+                DalamudApi.Framework.Update -= Update;
+                frameworkSubscribed = false;
+            }
+
+            if (uiDrawSubscribed)
+            {
+                DalamudApi.PluginInterface.UiBuilder.Draw -= PluginUI.Draw;
+                uiDrawSubscribed = false;
+            }
+
+            if (configUiSubscribed)
+            {
+                DalamudApi.PluginInterface.UiBuilder.OpenConfigUi -= ConfigUI.ToggleVisible;
+                configUiSubscribed = false;
+            }
+
+            if (modulesInitialized)
+            {
+                Modules.Modules.Dispose();
+                modulesInitialized = false;
+            }
+
+            if (gameInitialized)
+            {
+                Game.Dispose();
+                gameInitialized = false;
+            }
+
+            if (dalamudInitialized)
+            {
+                DalamudApi.Dispose();
+                dalamudInitialized = false;
+            }
         }
     }
 }

@@ -82,6 +82,9 @@ namespace Tsunippy.Modules
             DrawStatRow("Variance Buffer", $"{F2MS(animLock.LastVarianceBuffer)} ms", white);
             DrawStatRow("Adjusted Lock", $"{F2MS(animLock.LastAdjustedLock)} ms", green);
             DrawStatRow("Packets (50ms)", $"{animLock.PacketsSent}", gray);
+            DrawStatRow("Action Packets", $"{animLock.ActionPacketsSent}", gray);
+            DrawStatRow("Pending Saves", $"{animLock.PendingLearnedEntries}", gray);
+            DrawStatRow("Conflict State", animLock.ConflictDetected ? "Dry Run" : "Normal", animLock.ConflictDetected ? yellow : green);
 
             // Database info
             if (animLock.LastActionID != 0)
@@ -107,6 +110,30 @@ namespace Tsunippy.Modules
             DrawStatRow("Beta", $"{Config.JKBeta:F3}", gray);
             DrawStatRow("K", $"{Config.JKK:F1}", gray);
             DrawStatRow("Floor Scale", $"{Config.DynamicFloorScaling:F2}", gray);
+
+            ImGui.Spacing();
+            ImGui.TextColored(yellow, "Hook Health");
+            ImGui.Separator();
+            DrawStatRow("Hooks Ready", $"{Game.EnabledHookCount}/{Game.ExpectedHookCount}", Game.IsInitialized ? green : yellow);
+            DrawStatRow("Runtime Failures", $"{Game.RuntimeFailureCount}", Game.RuntimeFailureCount == 0 ? green : yellow);
+            if (!string.IsNullOrEmpty(Game.LastInitializationError))
+                ImGui.TextWrapped($"Init error: {Game.LastInitializationError}");
+            if (!string.IsNullOrEmpty(Game.LastRuntimeFailure))
+                ImGui.TextWrapped($"Last runtime failure: {Game.LastRuntimeFailure}");
+
+            var statuses = global::Tsunippy.Modules.Modules.GetStatusSnapshot();
+            if (statuses.Count > 0)
+            {
+                ImGui.Spacing();
+                ImGui.TextColored(yellow, "Module Health");
+                ImGui.Separator();
+                foreach (var status in statuses)
+                {
+                    DrawStatRow(status.Name, status.IsEnabled ? "Enabled" : "Disabled", status.IsEnabled ? green : yellow);
+                    if (!string.IsNullOrEmpty(status.LastFailure))
+                        ImGui.TextWrapped($"  {status.LastFailure}");
+                }
+            }
 
             ImGui.End();
         }
