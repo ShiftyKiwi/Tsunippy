@@ -6,7 +6,7 @@
   "Tags": ["jobs", "utility"],
   "CategoryTags": ["Jobs", "Utility"],
   "InternalName": "Tsunippy",
-  "AssemblyVersion": "1.0.2.0",
+  "AssemblyVersion": "1.0.2.1",
   "RepoUrl": "https://github.com/ShiftyKiwi/Tsunippy",
   "ApplicableVersion": "any"
 }
