@@ -4,9 +4,9 @@
         "Name": "Tsunippy",
         "Punchline": "Next-gen animation lock compensation with adaptive RTT estimation.",
         "Description": "Reduces the effects of lag on animation locks, weaving, and cast actions. Features Jacobson/Karels RTT estimation, dynamic latency floor, cast lock prediction, context-aware lock database, and real-time diagnostics. An improved successor to NoClippy.",
-        "Changelog": "Robustness release for Patch 7.45 HotFixes. Hardens hook dispatch and startup rollback, improves learned lock and cast-tax handling, separates likely action traffic for RTT weighting, and expands the diagnostics overlay with hook and module health.",
+        "Changelog": "Smoothness and hitch-fix update. Lets K be tuned with two-decimal precision and defers runtime config saves so combat-end animation lock updates do not hitch as packs die.",
         "InternalName": "Tsunippy",
-        "AssemblyVersion": "1.0.2.2",
+        "AssemblyVersion": "1.0.2.3",
         "RepoUrl": "https://github.com/ShiftyKiwi/Tsunippy",
         "ApplicableVersion": "any",
         "Tags": ["jobs", "utility"],
@@ -14,12 +14,12 @@
         "DalamudApiLevel": 14,
         "IconUrl": "",
         "ImageUrls": [],
-        "DownloadLinkInstall": "https://github.com/ShiftyKiwi/Tsunippy/releases/download/v1.0.2.2/latest.zip",
-        "DownloadLinkUpdate": "https://github.com/ShiftyKiwi/Tsunippy/releases/download/v1.0.2.2/latest.zip",
-        "DownloadLinkTesting": "https://github.com/ShiftyKiwi/Tsunippy/releases/download/v1.0.2.2/latest.zip",
+        "DownloadLinkInstall": "https://github.com/ShiftyKiwi/Tsunippy/releases/download/v1.0.2.3/latest.zip",
+        "DownloadLinkUpdate": "https://github.com/ShiftyKiwi/Tsunippy/releases/download/v1.0.2.3/latest.zip",
+        "DownloadLinkTesting": "https://github.com/ShiftyKiwi/Tsunippy/releases/download/v1.0.2.3/latest.zip",
         "IsHide": false,
         "IsTestingExclusive": false,
         "DownloadCount": 0,
-        "LastUpdate": "1773286528"
+        "LastUpdate": "1773295517"
     }
 ]

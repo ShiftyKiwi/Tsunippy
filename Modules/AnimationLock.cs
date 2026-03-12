@@ -56,13 +56,15 @@ namespace Tsunippy.Modules
 
         private bool isCasting;
         private bool enableAnticheat;
-        private bool saveConfig;
-        private bool wasInCombat;
-        private float saveConfigTimer;
+        private bool saveLearnedData;
+        private bool saveRuntimeStats;
+        private float outOfCombatIdleTimer;
         private int pendingLearnedEntries;
         private readonly Dictionary<ushort, float> appliedAnimationLocks = new();
 
-        private const float SaveFlushInterval = 30f;
+        private const float LearnedSaveIdleDelay = 15f;
+        private const float LearnedBatchSaveIdleDelay = 5f;
+        private const float RuntimeStatsSaveIdleDelay = 120f;
         private const int SaveFlushBatchSize = 8;
 
         public float LastRTT { get; private set; }
@@ -236,9 +238,7 @@ namespace Tsunippy.Modules
 
                     Config.TotalAnimationLockReduction += newLock - adjustedAnimationLock;
                     Config.TotalActionsReduced++;
-
-                    if (!saveConfig && DalamudApi.Condition[ConditionFlag.InCombat])
-                        saveConfig = true;
+                    MarkRuntimeStatsDirty();
                 }
 
                 if (!Config.EnableLogging)
@@ -274,18 +274,17 @@ namespace Tsunippy.Modules
 
         private void Update()
         {
-            saveConfigTimer += (float)DalamudApi.Framework.UpdateDelta.TotalSeconds;
+            var deltaSeconds = (float)DalamudApi.Framework.UpdateDelta.TotalSeconds;
             var inCombat = DalamudApi.Condition[ConditionFlag.InCombat];
+            outOfCombatIdleTimer = inCombat ? 0f : outOfCombatIdleTimer + deltaSeconds;
 
-            if (saveConfig && (DalamudApi.Condition[ConditionFlag.BetweenAreas]
-                || (!inCombat && (!wasInCombat || pendingLearnedEntries >= SaveFlushBatchSize || saveConfigTimer >= SaveFlushInterval))))
+            if ((saveLearnedData || saveRuntimeStats) && ShouldFlushConfigSave(inCombat))
             {
                 Config.Save(checkModules: false);
                 ResetDirtySaveState();
             }
 
-            packetTracker.Update((float)DalamudApi.Framework.UpdateDelta.TotalSeconds);
-            wasInCombat = inCombat;
+            packetTracker.Update(deltaSeconds);
         }
 
         public override unsafe void Enable()
@@ -368,7 +367,7 @@ namespace Tsunippy.Modules
                     PluginUI.SetItemTooltip("Controls how quickly the RTT variance adapts.\nLower = more stable variance, higher = more reactive to jitter.\nDefault: 0.25 (RFC 6298)");
 
                     var k = Config.JKK;
-                    if (ImGui.SliderFloat("K (Variance multiplier)", ref k, 0.5f, 4.0f, "%.1f"))
+                    if (ImGui.SliderFloat("K (Variance multiplier)", ref k, 0.5f, 4.0f, "%.2f"))
                     {
                         Config.JKK = k;
                         Config.Save(checkModules: false);
@@ -418,15 +417,41 @@ namespace Tsunippy.Modules
 
         private void MarkLearnedDataDirty()
         {
-            saveConfig = true;
-            saveConfigTimer = 0f;
+            saveLearnedData = true;
             pendingLearnedEntries++;
+        }
+
+        private void MarkRuntimeStatsDirty()
+        {
+            saveRuntimeStats = true;
+        }
+
+        private bool ShouldFlushConfigSave(bool inCombat)
+        {
+            if (DalamudApi.Condition[ConditionFlag.BetweenAreas])
+                return true;
+
+            if (inCombat)
+                return false;
+
+            if (saveLearnedData)
+            {
+                var learnedDelay = pendingLearnedEntries >= SaveFlushBatchSize
+                    ? LearnedBatchSaveIdleDelay
+                    : LearnedSaveIdleDelay;
+
+                if (outOfCombatIdleTimer >= learnedDelay)
+                    return true;
+            }
+
+            return saveRuntimeStats && outOfCombatIdleTimer >= RuntimeStatsSaveIdleDelay;
         }
 
         private void ResetDirtySaveState()
         {
-            saveConfig = false;
-            saveConfigTimer = 0f;
+            saveLearnedData = false;
+            saveRuntimeStats = false;
+            outOfCombatIdleTimer = 0f;
             pendingLearnedEntries = 0;
         }
 
