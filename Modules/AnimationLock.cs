@@ -42,6 +42,8 @@ namespace Tsunippy.Modules
 {
     public class AnimationLock : Module
     {
+        private const float LockEqualityEpsilon = 0.0005f;
+
         public override bool IsEnabled
         {
             get => Config.EnableAnimLockComp;
@@ -86,6 +88,7 @@ namespace Tsunippy.Modules
         public AnimationLock()
         {
             dynamicFloor = new DynamicFloor(Config.DynamicFloorWindow);
+            ResetRuntimeState();
         }
 
         private float GetPredictedLock(uint actionID)
@@ -109,16 +112,17 @@ namespace Tsunippy.Modules
 
         private unsafe void ApplyPredictedLock(ActionType actionType, uint actionID)
         {
-            if (Game.actionManager->animationLock != Game.DefaultClientAnimationLock)
+            if (!NearlyEqual(Game.actionManager->animationLock, Game.DefaultClientAnimationLock))
                 return;
 
             var id = ActionManager.GetSpellIdForAction(actionType, actionID);
             var predictedLock = GetPredictedLock(id);
 
+            appliedAnimationLocks[Game.actionManager->currentSequence] = predictedLock;
+
             if (!IsDryRunEnabled)
             {
                 Game.actionManager->animationLock = predictedLock;
-                appliedAnimationLocks[Game.actionManager->currentSequence] = predictedLock;
             }
 
             packetTracker.MarkActionIssued();
@@ -157,7 +161,7 @@ namespace Tsunippy.Modules
         {
             try
             {
-                if (oldLock == newLock || (nint)casterPtr != DalamudApi.ObjectTable.LocalPlayer?.Address)
+                if (NearlyEqual(oldLock, newLock) || (nint)casterPtr != DalamudApi.ObjectTable.LocalPlayer?.Address)
                     return;
 
                 if (isCasting)
@@ -174,7 +178,7 @@ namespace Tsunippy.Modules
                     return;
                 }
 
-                if (newLock != header->AnimationLock)
+                if (!NearlyEqual(newLock, header->AnimationLock))
                 {
                     PrintError("Mismatched animation lock offset! This can be caused by another plugin affecting the animation lock.");
                     return;
@@ -189,17 +193,30 @@ namespace Tsunippy.Modules
 
                 var sequence = header->SourceSequence;
                 var actionID = header->SpellId;
-                var appliedLock = appliedAnimationLocks.GetValueOrDefault(sequence, Game.DefaultClientAnimationLock);
+                var hadPrediction = appliedAnimationLocks.TryGetValue(sequence, out var appliedLock);
                 LastActionID = actionID;
 
                 appliedAnimationLocks.Remove(sequence);
 
-                var currentFloor = dynamicFloor.Floor;
-                var lastRecordedLock = IsDryRunEnabled ? newLock : appliedLock - currentFloor;
-
                 var context = GetCurrentContext();
                 if (!enableAnticheat && Config.LearnAnimationLocks && Config.LockDb.RecordLock(actionID, context, newLock))
                     MarkLearnedDataDirty();
+
+                if (!hadPrediction)
+                {
+                    LastRTT = 0;
+                    LastCorrection = 0;
+                    LastVarianceBuffer = 0;
+                    LastAdjustedLock = newLock;
+
+                    if (Config.EnableLogging)
+                        PrintLog($"Action: {actionID} ({F2MS(newLock)} ms) || No correlated prediction, skipped RTT correction");
+
+                    return;
+                }
+
+                var currentFloor = dynamicFloor.Floor;
+                var lastRecordedLock = appliedLock - currentFloor;
 
                 var correction = newLock - lastRecordedLock;
                 var rtt = appliedLock - oldLock;
@@ -289,6 +306,7 @@ namespace Tsunippy.Modules
 
         public override unsafe void Enable()
         {
+            ResetRuntimeState();
             Game.OnUseAction += UseAction;
             Game.OnUseActionLocation += UseActionLocation;
             Game.OnCastBegin += CastBegin;
@@ -307,6 +325,7 @@ namespace Tsunippy.Modules
             Game.OnReceiveActionEffect -= ReceiveActionEffect;
             Game.OnUpdate -= Update;
             Game.OnNetworkMessageDelegate -= NetworkMessage;
+            ResetRuntimeState();
         }
 
         public override void DrawConfig()
@@ -459,5 +478,27 @@ namespace Tsunippy.Modules
         {
             MarkLearnedDataDirty();
         }
+
+        private void ResetRuntimeState()
+        {
+            rttEstimator.Reset();
+            dynamicFloor.Reset();
+            packetTracker.Reset();
+            isCasting = false;
+            enableAnticheat = false;
+            saveLearnedData = false;
+            saveRuntimeStats = false;
+            outOfCombatIdleTimer = 0f;
+            pendingLearnedEntries = 0;
+            appliedAnimationLocks.Clear();
+            LastRTT = 0f;
+            LastCorrection = 0f;
+            LastVarianceBuffer = 0f;
+            LastAdjustedLock = 0f;
+            LastActionID = 0u;
+        }
+
+        private static bool NearlyEqual(float left, float right)
+            => Math.Abs(left - right) <= LockEqualityEpsilon;
     }
 }

@@ -36,6 +36,8 @@ namespace Tsunippy.Modules
     /// </summary>
     public class CastLockPrediction : Module
     {
+        private const float LockEqualityEpsilon = 0.0005f;
+
         public override bool IsEnabled
         {
             get => Config.EnableCastLockPrediction;
@@ -69,10 +71,7 @@ namespace Tsunippy.Modules
 
         private void CastInterrupt(nint actionManager)
         {
-            isCasting = false;
-            lockApplied = false;
-            castSequence = 0;
-            castActionId = 0;
+            ResetRuntimeState();
         }
 
         /// <summary>
@@ -117,13 +116,10 @@ namespace Tsunippy.Modules
             GameObjectId* targetEntityIds, float oldLock, float newLock)
         {
             if (!lockApplied) return;
-            if (oldLock == newLock || (nint)casterPtr != DalamudApi.ObjectTable.LocalPlayer?.Address) return;
+            if (NearlyEqual(oldLock, newLock) || (nint)casterPtr != DalamudApi.ObjectTable.LocalPlayer?.Address) return;
             if (castSequence != 0 && header->SourceSequence != castSequence) return;
 
             // This is the server's response for our cast action
-            lockApplied = false;
-            isCasting = false;
-            castSequence = 0;
             LastActualCastLock = newLock;
 
             var animLockModule = global::Tsunippy.Modules.Modules.GetInstance<AnimationLock>();
@@ -134,6 +130,9 @@ namespace Tsunippy.Modules
                     animLockModule?.NotifyLearnedDataChanged();
             }
 
+            isCasting = false;
+            lockApplied = false;
+            castSequence = 0;
             castActionId = 0;
             if (animLockModule?.IsDryRunEnabled ?? true) return;
 
@@ -154,6 +153,7 @@ namespace Tsunippy.Modules
 
         public override unsafe void Enable()
         {
+            ResetRuntimeState();
             Game.OnCastBegin += CastBegin;
             Game.OnCastInterrupt += CastInterrupt;
             Game.OnUpdate += Update;
@@ -166,6 +166,7 @@ namespace Tsunippy.Modules
             Game.OnCastInterrupt -= CastInterrupt;
             Game.OnUpdate -= Update;
             Game.OnReceiveActionEffect -= ReceiveActionEffect;
+            ResetRuntimeState();
         }
 
         public override void DrawConfig()
@@ -198,5 +199,19 @@ namespace Tsunippy.Modules
                 }
             }
         }
+
+        private void ResetRuntimeState()
+        {
+            isCasting = false;
+            lockApplied = false;
+            castSequence = 0;
+            castActionId = 0;
+            castContext = GameContext.PvE;
+            LastPredictedCastLock = 0f;
+            LastActualCastLock = 0f;
+        }
+
+        private static bool NearlyEqual(float left, float right)
+            => Math.Abs(left - right) <= LockEqualityEpsilon;
     }
 }
