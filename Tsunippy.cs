@@ -51,10 +51,16 @@ namespace Tsunippy
         }
 
         [Command("/tsunippy")]
-        [HelpMessage("/tsunippy [on|off|toggle|dry|diag|help] - Toggles the config window if no option is specified.")]
+        [HelpMessage("/tsunippy [on|off|toggle|dry|diag|capture-start|capture-stop|capture-note|lab-status|lab-selftest|help] - Toggles the config window if no option is specified.")]
         private void OnTsunippy(string command, string argument)
         {
-            switch (argument)
+            var trimmed = argument?.Trim() ?? string.Empty;
+            var separator = trimmed.IndexOf(' ');
+            var verb = separator >= 0 ? trimmed[..separator] : trimmed;
+            var remainder = separator >= 0 ? trimmed[(separator + 1)..].Trim() : string.Empty;
+            var animationLock = Modules.Modules.GetInstance<Modules.AnimationLock>();
+
+            switch (verb)
             {
                 case "on":
                 case "toggle" when !Config.EnableAnimLockComp:
@@ -85,6 +91,58 @@ namespace Tsunippy
                     PrintEcho($"Diagnostics overlay is now {(Config.EnableDiagnostics ? "enabled" : "disabled")}.");
                     break;
 
+                case "capture-start":
+                    if (animationLock == null)
+                    {
+                        PrintError("Animation lock module is not available.");
+                        break;
+                    }
+
+                    PrintEcho(animationLock.StartTraceCapture(string.IsNullOrWhiteSpace(remainder) ? "manual-command" : remainder));
+                    break;
+
+                case "capture-stop":
+                    if (animationLock == null)
+                    {
+                        PrintError("Animation lock module is not available.");
+                        break;
+                    }
+
+                    PrintEcho(animationLock.StopTraceCapture());
+                    break;
+
+                case "capture-note":
+                    if (animationLock == null)
+                    {
+                        PrintError("Animation lock module is not available.");
+                        break;
+                    }
+
+                    PrintEcho(animationLock.AddTraceCaptureNote(string.IsNullOrWhiteSpace(remainder) ? "manual note" : remainder));
+                    break;
+
+                case "lab-status":
+                    if (animationLock == null)
+                    {
+                        PrintError("Animation lock module is not available.");
+                        break;
+                    }
+
+                    PrintEcho(animationLock.IsCaptureActive
+                        ? $"Capture '{animationLock.CaptureLabel}' is active with {animationLock.CaptureEventCount} events."
+                        : $"No active capture. Last trace: {(string.IsNullOrEmpty(animationLock.LastCapturePath) ? "none" : animationLock.LastCapturePath)}");
+                    break;
+
+                case "lab-selftest":
+                    if (animationLock == null)
+                    {
+                        PrintError("Animation lock module is not available.");
+                        break;
+                    }
+
+                    PrintEcho(animationLock.RunLabSelfTest());
+                    break;
+
                 case "":
                     ConfigUI.ToggleVisible();
                     break;
@@ -94,6 +152,11 @@ namespace Tsunippy
                         "\n  on / off / toggle - Enable or disable animation lock compensation." +
                         "\n  dry - Toggle dry run (calculations only, no lock overrides)." +
                         "\n  diag - Toggle the real-time diagnostics overlay." +
+                        "\n  capture-start [label] - Start a normalized controller trace capture." +
+                        "\n  capture-stop - Stop capture and save the trace." +
+                        "\n  capture-note <text> - Add a note to the active trace." +
+                        "\n  lab-status - Show trace capture status." +
+                        "\n  lab-selftest - Run the offline controller lab against a synthetic trace." +
                         "\n  (no args) - Open the configuration window.");
                     break;
             }

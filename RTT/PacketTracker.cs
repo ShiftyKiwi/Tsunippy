@@ -1,4 +1,5 @@
 using System;
+using Tsunippy.Runtime;
 
 namespace Tsunippy.RTT
 {
@@ -53,9 +54,18 @@ namespace Tsunippy.RTT
         /// Record an outgoing packet.
         /// </summary>
         /// <param name="packet">Pointer to the packet data (for future type classification).</param>
-        public unsafe void RecordPacket(nint packet)
+        public void RecordPacket(TimingPacketClass packetClass = TimingPacketClass.Unknown)
         {
             totalPackets[currentIndex]++;
+
+            var actionClassified = packetClass is TimingPacketClass.ActionHeuristic or TimingPacketClass.ActionClassified;
+            if (actionClassified)
+            {
+                actionPackets[currentIndex]++;
+                if (actionPacketBudget > 0)
+                    actionPacketBudget--;
+                return;
+            }
 
             if (actionWindowRemaining <= 0 || actionPacketBudget <= 0)
                 return;

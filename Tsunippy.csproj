@@ -1,8 +1,12 @@
 <Project Sdk="Dalamud.NET.SDK/14.0.1">
     <PropertyGroup>
-        <Version>1.1.0.0</Version>
+        <Version>1.2.0.0</Version>
         <Nullable>disable</Nullable>
         <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
         <AppendPlatformToOutputPath>false</AppendPlatformToOutputPath>
     </PropertyGroup>
+    <ItemGroup>
+        <Compile Remove="Tsunippy.Lab\**\*.cs" />
+        <None Include="Tsunippy.Lab\**\*" />
+    </ItemGroup>
 </Project>

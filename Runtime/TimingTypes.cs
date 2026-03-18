@@ -2,6 +2,12 @@ using System;
 
 namespace Tsunippy.Runtime
 {
+    public enum TimingControllerStrategy
+    {
+        ConfidenceAdaptive = 0,
+        VarianceOnly = 1,
+    }
+
     public enum TimingRuntimeMode
     {
         Active = 0,
@@ -73,8 +79,27 @@ namespace Tsunippy.Runtime
         ConflictDetected = 8,
     }
 
+    public enum TimingPacketClass
+    {
+        Unknown = 0,
+        ActionHeuristic = 1,
+        ActionClassified = 2,
+        Control = 3,
+    }
+
+    public readonly record struct TimingResetSemantics(
+        bool ClearConflictQuarantine,
+        bool ClearFailureQuarantine);
+
+    public readonly record struct TimingDecisionInputs(
+        float ExistingLock,
+        float Floor,
+        float VarianceBuffer,
+        float ConfidenceGuard,
+        float RTTWeight);
+
     public readonly record struct TimingDecisionTrace(
-        DateTime TimestampUtc,
+        double TimelineSeconds,
         TimingDecisionSource Source,
         TimingDecisionReason Reason,
         TimingRuntimeMode Mode,
@@ -87,6 +112,8 @@ namespace Tsunippy.Runtime
         float FinalLock,
         float RTT,
         float PredictionConfidence,
+        float Correction,
+        TimingDecisionInputs Inputs,
         string Note);
 
     public static class TimingMath
@@ -96,6 +123,7 @@ namespace Tsunippy.Runtime
         public const float MaximumMeasuredRtt = 2.5f;
         public const float MaximumReasonableLock = 10f;
         public const float CastCompletionWindow = 0.05f;
+        public const float DefaultActionAnimationLock = 0.5f;
 
         public static bool NearlyEqual(float a, float b, float epsilon = LockEqualityEpsilon)
             => Math.Abs(a - b) <= epsilon;

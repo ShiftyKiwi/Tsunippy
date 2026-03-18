@@ -96,10 +96,14 @@ namespace Tsunippy.Modules
             DrawStatRow("Decision Reason", $"{animLock.LastDecisionReason}", white);
             DrawStatRow("Confidence", $"{animLock.LastPredictionConfidence:P0}", white);
             DrawStatRow("Pending Saves", $"{animLock.PendingLearnedEntries}", gray);
+            DrawStatRow("Capture Active", animLock.IsCaptureActive ? "Yes" : "No", animLock.IsCaptureActive ? green : gray);
+            DrawStatRow("Trace Events", $"{animLock.CaptureEventCount}", gray);
             if (!string.IsNullOrEmpty(animLock.LastDecisionNote))
                 ImGui.TextWrapped($"Decision note: {animLock.LastDecisionNote}");
             if (!string.IsNullOrEmpty(animLock.LastSuppressionReason))
                 ImGui.TextWrapped($"Last suppression: {animLock.LastSuppressionReason}");
+            if (!string.IsNullOrEmpty(animLock.LastCapturePath))
+                ImGui.TextWrapped($"Last trace: {animLock.LastCapturePath}");
 
             // Database info
             if (animLock.LastActionID != 0)
@@ -164,7 +168,9 @@ namespace Tsunippy.Modules
                 foreach (var decision in decisions)
                 {
                     ImGui.TextWrapped(
-                        $"{decision.TimestampUtc:HH:mm:ss} | {decision.Mode} | {decision.Source}/{decision.Reason} | {decision.ActionKind} {decision.ActionId} | pred {F2MS(decision.PredictedLock)} | final {F2MS(decision.FinalLock)} | rtt {F2MS(decision.RTT)}");
+                        $"t+{decision.TimelineSeconds:F3}s | {decision.Mode} | {decision.Source}/{decision.Reason} | {decision.ActionKind} {decision.ActionId} | pred {F2MS(decision.PredictedLock)} | final {F2MS(decision.FinalLock)} | rtt {F2MS(decision.RTT)}");
+                    if (decision.Inputs.Floor > 0 || decision.Inputs.VarianceBuffer > 0 || decision.Inputs.ConfidenceGuard > 0)
+                        ImGui.TextWrapped($"  inputs: floor {F2MS(decision.Inputs.Floor)} ms, buffer {F2MS(decision.Inputs.VarianceBuffer)} ms, guard {F2MS(decision.Inputs.ConfidenceGuard)} ms");
                     if (!string.IsNullOrEmpty(decision.Note))
                         ImGui.TextWrapped($"  {decision.Note}");
                 }
