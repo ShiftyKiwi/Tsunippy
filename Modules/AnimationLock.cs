@@ -10,6 +10,7 @@ using FFXIVClientStructs.FFXIV.Client.Game.Character;
 using Tsunippy.Database;
 using Tsunippy.Runtime;
 using Tsunippy.Runtime.Controller;
+using Tsunippy.Runtime.Corpus;
 using Tsunippy.Runtime.Replay;
 using Tsunippy.Runtime.Trace;
 using static Tsunippy.Tsunippy;
@@ -50,6 +51,8 @@ namespace Tsunippy.Modules
         private TimingTraceCaptureSession captureSession;
         private double captureStartTimelineSeconds;
         private bool captureTruncationNotified;
+        private string captureSavePath = string.Empty;
+        private string captureCorpusTraceId = string.Empty;
         private bool saveLearnedData;
         private bool saveRuntimeStats;
         private float outOfCombatIdleTimer;
@@ -93,6 +96,7 @@ namespace Tsunippy.Modules
         public bool CaptureTruncated => captureSession?.IsTruncated ?? false;
         public int CaptureEventCount => captureSession?.EventCount ?? 0;
         public string CaptureLabel => captureSession?.Trace.Metadata.Label ?? string.Empty;
+        public string CaptureTraceId => captureCorpusTraceId;
         public string LastCapturePath { get; private set; } = string.Empty;
 
         public AnimationLock()
@@ -268,18 +272,53 @@ namespace Tsunippy.Modules
             RefreshLiveProfile();
             controller.ApplyProfile(liveProfile);
 
-            captureStartTimelineSeconds = TimelineNow;
-            captureTruncationNotified = false;
-            captureSession = new TimingTraceCaptureSession(
-                liveProfile,
-                controller.ExportKnowledge(),
-                string.IsNullOrWhiteSpace(label) ? "live-capture" : label.Trim(),
-                typeof(Tsunippy).Assembly.GetName().Version?.ToString() ?? "unknown");
-
-            ApplyResult(controller.ResetRuntime(TimelineNow, RuntimeResetReason.Manual, "Trace capture start.", true, true));
-            RecordCapture(new TimingRuntimeResetTraceEvent(0d, RuntimeResetReason.Manual, new TimingResetSemantics(true, true), "Trace capture start."));
-
+            BeginTraceCapture(
+                BuildCaptureMetadata(
+                    string.IsNullOrWhiteSpace(label) ? "live-capture" : label.Trim(),
+                    string.Empty,
+                    TimingTraceScenarioBucket.Unspecified,
+                    string.Empty,
+                    null,
+                    "live-capture"),
+                string.Empty);
             return $"Started timing trace capture '{captureSession.Trace.Metadata.Label}'.";
+        }
+
+        public string StartCorpusTraceCapture(string traceId)
+        {
+            if (captureSession != null)
+                return $"Trace capture already running: {captureSession.Trace.Metadata.Label}";
+            if (string.IsNullOrWhiteSpace(traceId))
+                return $"Usage: /tsunippy corpus-start <trace-id> (manifest: {TimingTraceCorpusPaths.DefaultManifestPath})";
+
+            var manifestPath = TimingTraceCorpusPaths.DefaultManifestPath;
+            if (!File.Exists(manifestPath))
+                return $"Corpus manifest not found at {manifestPath}. Run /tsunippy corpus-init first.";
+
+            var corpus = TimingTraceCorpusJson.Load(manifestPath);
+            var entry = corpus.Entries.Find(candidate => string.Equals(candidate.TraceId, traceId.Trim(), StringComparison.OrdinalIgnoreCase));
+            if (entry == null)
+                return $"Trace '{traceId}' was not found in {manifestPath}.";
+
+            RefreshLiveProfile();
+            controller.ApplyProfile(liveProfile);
+
+            var corpusRoot = TimingTraceCorpusPaths.ResolveCorpusRoot(manifestPath);
+            BeginTraceCapture(
+                BuildCaptureMetadata(entry.Name, entry.TraceId, entry.ScenarioBucket, entry.Purpose, entry.Tags, "live-corpus-capture"),
+                TimingTraceCorpusPaths.ResolveTracePath(corpusRoot, entry));
+            captureCorpusTraceId = entry.TraceId;
+            return $"Started corpus trace capture '{entry.TraceId}' ({entry.Name}).";
+        }
+
+        public string InitializeDefaultTraceCorpus()
+        {
+            var manifestPath = TimingTraceCorpusPaths.DefaultManifestPath;
+            if (File.Exists(manifestPath))
+                return $"Corpus manifest already exists at {manifestPath}";
+
+            var scaffoldedManifest = TimingTraceCorpusFactory.ScaffoldRecommendedV1(TimingTraceCorpusPaths.DefaultRoot);
+            return $"Initialized the default trace corpus scaffold at {scaffoldedManifest}";
         }
 
         public string StopTraceCapture()
@@ -288,10 +327,18 @@ namespace Tsunippy.Modules
                 return "No timing trace capture is currently active.";
 
             var completedSession = captureSession;
+            var savePath = captureSavePath;
+            var corpusTraceId = captureCorpusTraceId;
             captureSession = null;
+            captureSavePath = string.Empty;
+            captureCorpusTraceId = string.Empty;
 
-            var path = completedSession.SaveToDirectory(GetTraceDirectory());
+            var path = string.IsNullOrEmpty(savePath)
+                ? completedSession.SaveToDirectory(GetTraceDirectory())
+                : completedSession.SaveToPath(savePath);
             LastCapturePath = path;
+            if (!string.IsNullOrEmpty(corpusTraceId))
+                UpdateCorpusCaptureRecord(corpusTraceId, completedSession.Trace.Metadata.PluginVersion);
             return $"Saved timing trace to {path}";
         }
 
@@ -312,6 +359,66 @@ namespace Tsunippy.Modules
             var comparison = Runtime.Evaluation.TimingReplayEvaluator.Compare(analysis.Replay, baseline.Replay);
             var equivalence = analysis.Equivalence?.IsEquivalent == true ? "equivalent" : "diverged";
             return $"Lab self-test {equivalence}, fingerprint {analysis.Replay.DecisionFingerprint[..12]}, baseline disagreement delta {comparison.DisagreementDeltaMs:F2} ms.";
+        }
+
+        private void BeginTraceCapture(TimingTraceMetadata metadata, string savePath)
+        {
+            captureStartTimelineSeconds = TimelineNow;
+            captureTruncationNotified = false;
+            captureSavePath = savePath ?? string.Empty;
+            captureCorpusTraceId = metadata?.CorpusTraceId ?? string.Empty;
+            captureSession = new TimingTraceCaptureSession(
+                liveProfile,
+                controller.ExportKnowledge(),
+                metadata ?? new TimingTraceMetadata
+                {
+                    Label = "live-capture",
+                    PluginVersion = typeof(Tsunippy).Assembly.GetName().Version?.ToString() ?? "unknown",
+                });
+
+            ApplyResult(controller.ResetRuntime(TimelineNow, RuntimeResetReason.Manual, "Trace capture start.", true, true));
+            RecordCapture(new TimingRuntimeResetTraceEvent(0d, RuntimeResetReason.Manual, new TimingResetSemantics(true, true), "Trace capture start."));
+        }
+
+        private static TimingTraceMetadata BuildCaptureMetadata(
+            string label,
+            string corpusTraceId,
+            TimingTraceScenarioBucket bucket,
+            string purpose,
+            System.Collections.Generic.IEnumerable<string> tags,
+            string source)
+            => new()
+            {
+                Label = label ?? string.Empty,
+                CorpusTraceId = corpusTraceId ?? string.Empty,
+                Source = source ?? "live-capture",
+                PluginVersion = typeof(Tsunippy).Assembly.GetName().Version?.ToString() ?? "unknown",
+                ScenarioBucket = bucket,
+                Purpose = purpose ?? string.Empty,
+                Tags = tags == null ? new() : new System.Collections.Generic.List<string>(tags),
+            };
+
+        private void UpdateCorpusCaptureRecord(string traceId, string pluginVersion)
+        {
+            try
+            {
+                var manifestPath = TimingTraceCorpusPaths.DefaultManifestPath;
+                if (!File.Exists(manifestPath))
+                    return;
+
+                var corpus = TimingTraceCorpusJson.Load(manifestPath);
+                var entry = corpus.Entries.Find(candidate => string.Equals(candidate.TraceId, traceId, StringComparison.OrdinalIgnoreCase));
+                if (entry == null)
+                    return;
+
+                entry.LastCapturedUtc = DateTime.UtcNow;
+                entry.LastCapturedPluginVersion = pluginVersion ?? string.Empty;
+                TimingTraceCorpusJson.Save(manifestPath, corpus);
+            }
+            catch (Exception exception)
+            {
+                DalamudApi.LogWarning($"Failed to update corpus capture record for '{traceId}': {exception.Message}");
+            }
         }
 
         private unsafe void ApplyResult(TimingControllerEventResult result)

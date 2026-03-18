@@ -4,9 +4,9 @@
         "Name": "Tsunippy",
         "Punchline": "Next-gen animation lock compensation with adaptive RTT estimation.",
         "Description": "Reduces the effects of lag on animation locks, weaving, and cast actions. Features Jacobson/Karels RTT estimation, dynamic latency floor, cast lock prediction, context-aware lock database, and real-time diagnostics. An improved successor to NoClippy.",
-        "Changelog": "Controller-lab trustworthiness release. Adds normalized trace capture with observed decision streams, deterministic replay/equivalence analysis, reset-semantic fidelity, cast-interrupt fidelity, regression tooling, and file-backed replay profiles.",
+        "Changelog": "Real-trace corpus workflow release. Adds a manifest-driven trace corpus, gold-trace validation, corpus-aware capture commands, scenario scaffolding, and corpus regression tooling for disciplined replay iteration.",
         "InternalName": "Tsunippy",
-        "AssemblyVersion": "1.2.0.0",
+        "AssemblyVersion": "1.3.0.0",
         "RepoUrl": "https://github.com/ShiftyKiwi/Tsunippy",
         "ApplicableVersion": "any",
         "Tags": ["jobs", "utility"],
@@ -14,12 +14,12 @@
         "DalamudApiLevel": 14,
         "IconUrl": "",
         "ImageUrls": [],
-        "DownloadLinkInstall": "https://github.com/ShiftyKiwi/Tsunippy/releases/download/v1.2.0.0/latest.zip",
-        "DownloadLinkUpdate": "https://github.com/ShiftyKiwi/Tsunippy/releases/download/v1.2.0.0/latest.zip",
-        "DownloadLinkTesting": "https://github.com/ShiftyKiwi/Tsunippy/releases/download/v1.2.0.0/latest.zip",
+        "DownloadLinkInstall": "https://github.com/ShiftyKiwi/Tsunippy/releases/download/v1.3.0.0/latest.zip",
+        "DownloadLinkUpdate": "https://github.com/ShiftyKiwi/Tsunippy/releases/download/v1.3.0.0/latest.zip",
+        "DownloadLinkTesting": "https://github.com/ShiftyKiwi/Tsunippy/releases/download/v1.3.0.0/latest.zip",
         "IsHide": false,
         "IsTestingExclusive": false,
         "DownloadCount": 0,
-        "LastUpdate": "1773801625"
+        "LastUpdate": "1773803572"
     }
 ]

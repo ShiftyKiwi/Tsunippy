@@ -11,20 +11,31 @@ namespace Tsunippy.Runtime.Trace
         private readonly List<TimingTraceEvent> events = new();
 
         public TimingTraceCaptureSession(TimingControllerProfile profile, TimingKnowledgeSnapshot knowledge, string label, string pluginVersion, int maxEvents = 200_000)
-        {
-            MaxEvents = Math.Max(maxEvents, 1000);
-            Trace = new TimingTraceDocument
-            {
-                Metadata = new TimingTraceMetadata
+            : this(
+                profile,
+                knowledge,
+                new TimingTraceMetadata
                 {
                     Label = label ?? string.Empty,
                     PluginVersion = pluginVersion ?? string.Empty,
                 },
+                maxEvents)
+        {
+        }
+
+        public TimingTraceCaptureSession(TimingControllerProfile profile, TimingKnowledgeSnapshot knowledge, TimingTraceMetadata metadata, int maxEvents = 200_000)
+        {
+            MaxEvents = Math.Max(maxEvents, 1000);
+            Trace = new TimingTraceDocument
+            {
+                Metadata = metadata ?? new TimingTraceMetadata(),
                 CapturedProfile = profile?.Clone() ?? TimingControllerProfile.CreateFrontierDefault(),
                 CapturedKnowledge = knowledge ?? new TimingKnowledgeSnapshot(),
                 Events = events,
                 ObservedDecisions = new List<TimingDecisionTrace>(),
             };
+
+            Trace.Metadata.Tags ??= new();
         }
 
         public TimingTraceDocument Trace { get; }
@@ -72,6 +83,13 @@ namespace Tsunippy.Runtime.Trace
 
             var fileName = $"{DateTime.UtcNow:yyyyMMdd-HHmmss}-{sanitizedLabel}.timing-trace.json";
             var path = Path.Combine(directoryPath, fileName);
+            TimingTraceJson.Save(path, Trace);
+            LastSavedPath = path;
+            return path;
+        }
+
+        public string SaveToPath(string path)
+        {
             TimingTraceJson.Save(path, Trace);
             LastSavedPath = path;
             return path;

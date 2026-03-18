@@ -9,7 +9,16 @@ namespace Tsunippy.Runtime.Trace
 {
     public static class TimingTraceSchema
     {
-        public const int CurrentVersion = 2;
+        public const int CurrentVersion = 3;
+    }
+
+    public enum TimingTraceScenarioBucket : byte
+    {
+        Unspecified = 0,
+        InstantBaseline = 1,
+        CastBaseline = 2,
+        ConflictRecovery = 3,
+        MessyGameplay = 4,
     }
 
     public sealed class TimingTraceDocument
@@ -25,9 +34,13 @@ namespace Tsunippy.Runtime.Trace
     public sealed class TimingTraceMetadata
     {
         public string TraceId { get; set; } = Guid.NewGuid().ToString("N");
+        public string CorpusTraceId { get; set; } = string.Empty;
         public string Label { get; set; } = string.Empty;
         public string Source { get; set; } = "live-capture";
         public string PluginVersion { get; set; } = string.Empty;
+        public TimingTraceScenarioBucket ScenarioBucket { get; set; } = TimingTraceScenarioBucket.Unspecified;
+        public string Purpose { get; set; } = string.Empty;
+        public List<string> Tags { get; set; } = new();
         public DateTime CreatedUtc { get; set; } = DateTime.UtcNow;
         public string Notes { get; set; } = string.Empty;
     }

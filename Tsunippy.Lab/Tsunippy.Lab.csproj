@@ -12,6 +12,7 @@
     <Compile Include="..\Runtime\TimingTypes.cs" Link="Runtime\TimingTypes.cs" />
     <Compile Include="..\Runtime\DecisionJournal.cs" Link="Runtime\DecisionJournal.cs" />
     <Compile Include="..\Runtime\Controller\*.cs" Link="Runtime\Controller\%(Filename)%(Extension)" />
+    <Compile Include="..\Runtime\Corpus\*.cs" Link="Runtime\Corpus\%(Filename)%(Extension)" />
     <Compile Include="..\Runtime\Trace\*.cs" Link="Runtime\Trace\%(Filename)%(Extension)" />
     <Compile Include="..\Runtime\Evaluation\*.cs" Link="Runtime\Evaluation\%(Filename)%(Extension)" />
     <Compile Include="..\Runtime\Replay\*.cs" Link="Runtime\Replay\%(Filename)%(Extension)" />

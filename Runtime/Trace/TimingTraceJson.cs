@@ -31,6 +31,7 @@ namespace Tsunippy.Runtime.Trace
             trace.CapturedProfile ??= Controller.TimingControllerProfile.CreateFrontierDefault();
             trace.CapturedKnowledge ??= new TimingKnowledgeSnapshot();
             trace.Metadata ??= new TimingTraceMetadata();
+            trace.Metadata.Tags ??= new();
             return trace;
         }
 
