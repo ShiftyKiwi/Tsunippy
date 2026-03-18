@@ -4,9 +4,9 @@
         "Name": "Tsunippy",
         "Punchline": "Next-gen animation lock compensation with adaptive RTT estimation.",
         "Description": "Reduces the effects of lag on animation locks, weaving, and cast actions. Features Jacobson/Karels RTT estimation, dynamic latency floor, cast lock prediction, context-aware lock database, and real-time diagnostics. An improved successor to NoClippy.",
-        "Changelog": "Smoothness and hitch-fix update. Lets K be tuned with two-decimal precision and defers runtime config saves so combat-end animation lock updates do not hitch as packs die.",
+        "Changelog": "Architectural timing-runtime upgrade. Unifies instant and cast lock authority under one controller, adds explicit runtime reset/quarantine state, deterministic module lifecycle recovery, and live decision-rationale diagnostics.",
         "InternalName": "Tsunippy",
-        "AssemblyVersion": "1.0.2.3",
+        "AssemblyVersion": "1.1.0.0",
         "RepoUrl": "https://github.com/ShiftyKiwi/Tsunippy",
         "ApplicableVersion": "any",
         "Tags": ["jobs", "utility"],
@@ -14,12 +14,12 @@
         "DalamudApiLevel": 14,
         "IconUrl": "",
         "ImageUrls": [],
-        "DownloadLinkInstall": "https://github.com/ShiftyKiwi/Tsunippy/releases/download/v1.0.2.3/latest.zip",
-        "DownloadLinkUpdate": "https://github.com/ShiftyKiwi/Tsunippy/releases/download/v1.0.2.3/latest.zip",
-        "DownloadLinkTesting": "https://github.com/ShiftyKiwi/Tsunippy/releases/download/v1.0.2.3/latest.zip",
+        "DownloadLinkInstall": "https://github.com/ShiftyKiwi/Tsunippy/releases/download/v1.1.0.0/latest.zip",
+        "DownloadLinkUpdate": "https://github.com/ShiftyKiwi/Tsunippy/releases/download/v1.1.0.0/latest.zip",
+        "DownloadLinkTesting": "https://github.com/ShiftyKiwi/Tsunippy/releases/download/v1.1.0.0/latest.zip",
         "IsHide": false,
         "IsTestingExclusive": false,
         "DownloadCount": 0,
-        "LastUpdate": "1773295517"
+        "LastUpdate": "1773772188"
     }
 ]
