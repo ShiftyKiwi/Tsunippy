@@ -1,18 +1,14 @@
 using System;
-using System.Diagnostics;
-using System.IO;
+using System.Collections.Generic;
 using System.Numerics;
 using System.Text;
 using Dalamud.Bindings.ImGui;
 using Dalamud.Game.ClientState.Conditions;
 using FFXIVClientStructs.FFXIV.Client.Game;
 using FFXIVClientStructs.FFXIV.Client.Game.Character;
+using FFXIVClientStructs.FFXIV.Client.Game.Object;
 using Tsunippy.Database;
-using Tsunippy.Runtime;
-using Tsunippy.Runtime.Controller;
-using Tsunippy.Runtime.Corpus;
-using Tsunippy.Runtime.Replay;
-using Tsunippy.Runtime.Trace;
+using Tsunippy.RTT;
 using static Tsunippy.Tsunippy;
 
 namespace Tsunippy
@@ -23,13 +19,20 @@ namespace Tsunippy
         public bool EnableLogging = false;
         public bool EnableDryRun = false;
         public bool LearnAnimationLocks = true;
-        public TimingControllerStrategy ControllerStrategy = TimingControllerStrategy.ConfidenceAdaptive;
+
+        // Jacobson/Karels tuning parameters
         public float JKAlpha = 0.125f;
         public float JKBeta = 0.25f;
         public float JKK = 2.0f;
+
+        // Dynamic floor tuning
         public float DynamicFloorScaling = 0.85f;
         public int DynamicFloorWindow = 100;
+
+        // Context-aware lock database
         public LockDatabase LockDb = new();
+
+        // Lifetime statistics
         public ulong TotalActionsReduced = 0ul;
         public double TotalAnimationLockReduction = 0d;
     }
@@ -39,86 +42,249 @@ namespace Tsunippy.Modules
 {
     public class AnimationLock : Module
     {
+        public override bool IsEnabled
+        {
+            get => Config.EnableAnimLockComp;
+            set => Config.EnableAnimLockComp = value;
+        }
+
+        public override int DrawOrder => 1;
+
+        private readonly JacobsonKarels rttEstimator = new();
+        private readonly DynamicFloor dynamicFloor;
+        private readonly PacketTracker packetTracker = new();
+
+        private bool isCasting;
+        private bool enableAnticheat;
+        private bool saveLearnedData;
+        private bool saveRuntimeStats;
+        private float outOfCombatIdleTimer;
+        private int pendingLearnedEntries;
+        private readonly Dictionary<ushort, float> appliedAnimationLocks = new();
+
         private const float LearnedSaveIdleDelay = 15f;
         private const float LearnedBatchSaveIdleDelay = 5f;
         private const float RuntimeStatsSaveIdleDelay = 120f;
         private const int SaveFlushBatchSize = 8;
 
-        private readonly Stopwatch runtimeClock = Stopwatch.StartNew();
-        private readonly TimingControllerProfile liveProfile = TimingControllerProfile.CreateFrontierDefault();
-
-        private TimingControllerEngine controller;
-        private TimingTraceCaptureSession captureSession;
-        private double captureStartTimelineSeconds;
-        private bool captureTruncationNotified;
-        private string captureSavePath = string.Empty;
-        private string captureCorpusTraceId = string.Empty;
-        private bool saveLearnedData;
-        private bool saveRuntimeStats;
-        private float outOfCombatIdleTimer;
-        private int pendingLearnedEntries;
-        private int hotPathFailureCount;
-        private string lastHotPathFailure = string.Empty;
-
-        public override bool DisableOnRuntimeFailure => false;
-        public override bool IsEnabled { get => Config.EnableAnimLockComp; set => Config.EnableAnimLockComp = value; }
-        public override int DrawOrder => 1;
-
-        public float LastRTT => controller.LastRTT;
-        public float LastCorrection => controller.LastCorrection;
-        public float LastVarianceBuffer => controller.LastVarianceBuffer;
-        public float LastAdjustedLock => controller.LastAdjustedLock;
-        public uint LastActionID => controller.LastActionId;
-        public float CurrentFloor => controller.CurrentFloor;
-        public float CurrentSRTT => controller.CurrentSRTT;
-        public float CurrentRTTVAR => controller.CurrentRTTVAR;
-        public int FloorSampleCount => controller.FloorSampleCount;
-        public int RTTSampleCount => controller.RTTSampleCount;
-        public int PacketsSent => controller.PacketsSent;
-        public int ActionPacketsSent => controller.ActionPacketsSent;
+        public float LastRTT { get; private set; }
+        public float LastCorrection { get; private set; }
+        public float LastVarianceBuffer { get; private set; }
+        public float LastAdjustedLock { get; private set; }
+        public uint LastActionID { get; private set; }
+        public float CurrentFloor => dynamicFloor.Floor;
+        public float CurrentSRTT => rttEstimator.SmoothedRTT;
+        public float CurrentRTTVAR => rttEstimator.RTTVariance;
+        public int FloorSampleCount => dynamicFloor.CurrentSampleCount;
+        public int RTTSampleCount => rttEstimator.SampleCount;
+        public int PacketsSent => packetTracker.TotalPacketsSent;
+        public int ActionPacketsSent => packetTracker.ActionPacketsSent;
         public int PendingLearnedEntries => pendingLearnedEntries;
-        public int PendingPredictionCount => controller.PendingPredictionCount;
-        public int HotPathFailureCount => hotPathFailureCount;
-        public CastLifecycleStage CastStage => controller.CastStage;
-        public TimingRuntimeMode CurrentMode => controller.CurrentMode;
-        public TimingQuality CurrentQuality => controller.CurrentQuality;
-        public TimingDecisionSource LastDecisionSource => controller.LastDecisionSource;
-        public TimingDecisionReason LastDecisionReason => controller.LastDecisionReason;
-        public string LastDecisionNote => controller.LastDecisionNote;
-        public float LastPredictionConfidence => controller.LastPredictionConfidence;
-        public bool ConflictDetected => controller.ConflictDetected;
-        public bool FailureQuarantined => controller.FailureQuarantined;
-        public string LastHotPathFailure => lastHotPathFailure;
-        public string LastSuppressionReason => controller.LastSuppressionReason;
-        public string LastRuntimeResetReason => controller.LastRuntimeResetReason;
-        public bool IsDryRunEnabled => CurrentMode != TimingRuntimeMode.Active;
-        public bool IsCaptureActive => captureSession != null;
-        public bool CaptureTruncated => captureSession?.IsTruncated ?? false;
-        public int CaptureEventCount => captureSession?.EventCount ?? 0;
-        public string CaptureLabel => captureSession?.Trace.Metadata.Label ?? string.Empty;
-        public string CaptureTraceId => captureCorpusTraceId;
-        public string LastCapturePath { get; private set; } = string.Empty;
+        public bool ConflictDetected => enableAnticheat;
+        public bool IsDryRunEnabled => enableAnticheat || Config.EnableDryRun;
 
         public AnimationLock()
         {
-            RefreshLiveProfile();
-            controller = new TimingControllerEngine(liveProfile, Config.LockDb ??= new LockDatabase(), Config.CastTaxDb ??= new Database.CastTaxDatabase(), 16);
+            dynamicFloor = new DynamicFloor(Config.DynamicFloorWindow);
         }
 
-        public TimingDecisionTrace[] GetRecentDecisions() => controller.GetRecentDecisions();
-
-        public override void ResetRuntime(RuntimeResetReason reason)
+        private float GetPredictedLock(uint actionID)
         {
-            RefreshLiveProfile();
-            controller.ApplyProfile(liveProfile);
+            var context = GetCurrentContext();
+            var baseLock = Config.LockDb.GetLock(actionID, context, Game.DefaultClientAnimationLock);
+            return baseLock + dynamicFloor.Floor;
+        }
 
-            var clearConflict = reason is RuntimeResetReason.Enable or RuntimeResetReason.Manual or RuntimeResetReason.ConflictRecovery or RuntimeResetReason.ModuleStateChange;
-            var clearFailure = reason is RuntimeResetReason.Enable or RuntimeResetReason.Manual or RuntimeResetReason.ModuleStateChange;
-            var result = controller.ResetRuntime(TimelineNow, reason, reason.ToString(), clearConflict, clearFailure);
-            ApplyResult(result);
+        private static GameContext GetCurrentContext()
+        {
+            try
+            {
+                return DalamudApi.ClientState.IsPvP ? GameContext.PvP : GameContext.PvE;
+            }
+            catch
+            {
+                return GameContext.PvE;
+            }
+        }
 
-            if (captureSession != null)
-                RecordCapture(new TimingRuntimeResetTraceEvent(CaptureTimelineNow, reason, new TimingResetSemantics(clearConflict, clearFailure), $"Runtime reset: {reason}"));
+        private unsafe void ApplyPredictedLock(ActionType actionType, uint actionID)
+        {
+            if (Game.actionManager->animationLock != Game.DefaultClientAnimationLock)
+                return;
+
+            var id = ActionManager.GetSpellIdForAction(actionType, actionID);
+            var predictedLock = GetPredictedLock(id);
+
+            if (!IsDryRunEnabled)
+            {
+                Game.actionManager->animationLock = predictedLock;
+                appliedAnimationLocks[Game.actionManager->currentSequence] = predictedLock;
+            }
+
+            packetTracker.MarkActionIssued();
+            DalamudApi.LogDebug($"Applying {F2MS(predictedLock)} ms animation lock for {actionType} {actionID} ({id}), floor={F2MS(dynamicFloor.Floor)} ms");
+        }
+
+        private unsafe void UseAction(ActionManager* actionManager, ActionType actionType, uint actionID,
+            ulong targetId, uint extraParam, ActionManager.UseActionMode mode, uint comboRouteId,
+            bool* outOptAreaTargeted, bool ret)
+        {
+            if (!ret)
+                return;
+
+            ApplyPredictedLock(actionType, actionID);
+        }
+
+        private unsafe void UseActionLocation(nint actionManager, uint actionType, uint actionID,
+            ulong targetedActorID, nint vectorLocation, uint param, byte ret)
+        {
+            if (ret == 0)
+                return;
+
+            ApplyPredictedLock((ActionType)actionType, actionID);
+        }
+
+        private void CastBegin(ulong objectID, nint packetData)
+            => isCasting = true;
+
+        private void CastInterrupt(nint actionManager)
+            => isCasting = false;
+
+        private unsafe void ReceiveActionEffect(uint casterEntityId, Character* casterPtr,
+            Vector3* targetPos, ActionEffectHandler.Header* header,
+            ActionEffectHandler.TargetEffects* effects, GameObjectId* targetEntityIds,
+            float oldLock, float newLock)
+        {
+            try
+            {
+                if (oldLock == newLock || (nint)casterPtr != DalamudApi.ObjectTable.LocalPlayer?.Address)
+                    return;
+
+                if (isCasting)
+                {
+                    isCasting = false;
+                    newLock += oldLock;
+
+                    if (!IsDryRunEnabled)
+                        Game.actionManager->animationLock = newLock;
+
+                    if (Config.EnableLogging)
+                        PrintLog($"Cast Lock: {F2MS(newLock)} ms (+{F2MS(oldLock)})");
+
+                    return;
+                }
+
+                if (newLock != header->AnimationLock)
+                {
+                    PrintError("Mismatched animation lock offset! This can be caused by another plugin affecting the animation lock.");
+                    return;
+                }
+
+                var isUsingAlexander = newLock % 0.01 is >= 0.0005f and <= 0.0095f;
+                if (!enableAnticheat && isUsingAlexander)
+                {
+                    enableAnticheat = true;
+                    PrintError($"Unexpected lock of {F2MS(newLock)} ms, temporary dry run has been enabled. Please disable any other programs or plugins that may be affecting the animation lock.");
+                }
+
+                var sequence = header->SourceSequence;
+                var actionID = header->SpellId;
+                var appliedLock = appliedAnimationLocks.GetValueOrDefault(sequence, Game.DefaultClientAnimationLock);
+                LastActionID = actionID;
+
+                appliedAnimationLocks.Remove(sequence);
+
+                var currentFloor = dynamicFloor.Floor;
+                var lastRecordedLock = IsDryRunEnabled ? newLock : appliedLock - currentFloor;
+
+                var context = GetCurrentContext();
+                if (!enableAnticheat && Config.LearnAnimationLocks && Config.LockDb.RecordLock(actionID, context, newLock))
+                    MarkLearnedDataDirty();
+
+                var correction = newLock - lastRecordedLock;
+                var rtt = appliedLock - oldLock;
+                LastRTT = rtt;
+
+                dynamicFloor.AddSample(rtt);
+                if (rtt <= currentFloor)
+                {
+                    if (Config.EnableLogging)
+                        PrintLog($"RTT ({F2MS(rtt)} ms) was lower than floor ({F2MS(currentFloor)} ms), no adjustments made");
+
+                    LastCorrection = 0;
+                    LastVarianceBuffer = 0;
+                    LastAdjustedLock = newLock;
+                    return;
+                }
+
+                var weight = packetTracker.GetRTTWeight();
+                rttEstimator.AddSample(rtt, weight);
+
+                rttEstimator.Alpha = Config.JKAlpha;
+                rttEstimator.Beta = Config.JKBeta;
+                rttEstimator.K = Config.JKK;
+                dynamicFloor.ScalingFactor = Config.DynamicFloorScaling;
+
+                var varianceBuffer = rttEstimator.VarianceBuffer;
+                LastVarianceBuffer = varianceBuffer;
+                LastCorrection = correction;
+
+                var adjustedAnimationLock = Math.Max(oldLock + correction + varianceBuffer, 0);
+                LastAdjustedLock = (float)adjustedAnimationLock;
+
+                if (!IsDryRunEnabled && float.IsFinite((float)adjustedAnimationLock) && adjustedAnimationLock < 10)
+                {
+                    Game.actionManager->animationLock = (float)adjustedAnimationLock;
+
+                    Config.TotalAnimationLockReduction += newLock - adjustedAnimationLock;
+                    Config.TotalActionsReduced++;
+                    MarkRuntimeStatsDirty();
+                }
+
+                if (!Config.EnableLogging)
+                    return;
+
+                var sb = new StringBuilder(IsDryRunEnabled ? "[DRY] " : string.Empty)
+                    .Append($"Action: {actionID} ")
+                    .Append(lastRecordedLock != newLock
+                        ? $"({F2MS((float)lastRecordedLock)} > {F2MS(newLock)} ms)"
+                        : $"({F2MS(newLock)} ms)")
+                    .Append($" || RTT: {F2MS(rtt)} ms (SRTT: {F2MS(rttEstimator.SmoothedRTT)}, VAR: {F2MS(rttEstimator.RTTVariance)})");
+
+                if (enableAnticheat)
+                    sb.Append(" [Alexander detected]");
+
+                if (!IsDryRunEnabled)
+                    sb.Append($" || Lock: {F2MS(oldLock)} > {F2MS((float)adjustedAnimationLock)} ({F2MS((float)(correction + varianceBuffer)):+0;-#}) ms");
+
+                sb.Append($" || Floor: {F2MS(dynamicFloor.Floor)} ms | Wt: {weight:F2} | Pkts: {packetTracker.TotalPacketsSent}/{packetTracker.ActionPacketsSent}");
+                PrintLog(sb.ToString());
+            }
+            catch (Exception e)
+            {
+                DalamudApi.LogError($"AnimationLock.ReceiveActionEffect failed for action {LastActionID}: {e}");
+                PrintError("Error in AnimationLock Module. Check Dalamud logs for details.");
+            }
+        }
+
+        private void NetworkMessage(nint packet)
+        {
+            packetTracker.RecordPacket(packet);
+        }
+
+        private void Update()
+        {
+            var deltaSeconds = (float)DalamudApi.Framework.UpdateDelta.TotalSeconds;
+            var inCombat = DalamudApi.Condition[ConditionFlag.InCombat];
+            outOfCombatIdleTimer = inCombat ? 0f : outOfCombatIdleTimer + deltaSeconds;
+
+            if ((saveLearnedData || saveRuntimeStats) && ShouldFlushConfigSave(inCombat))
+            {
+                Config.Save(checkModules: false);
+                ResetDirtySaveState();
+            }
+
+            packetTracker.Update(deltaSeconds);
         }
 
         public override unsafe void Enable()
@@ -143,455 +309,54 @@ namespace Tsunippy.Modules
             Game.OnNetworkMessageDelegate -= NetworkMessage;
         }
 
-        private unsafe void UseAction(ActionManager* actionManager, ActionType actionType, uint actionID, ulong targetId, uint extraParam, ActionManager.UseActionMode mode, uint comboRouteId, bool* outOptAreaTargeted, bool ret)
-            => GuardHotPath(nameof(UseAction), () =>
-            {
-                var manager = Game.actionManager;
-                if (!ret || manager == null)
-                    return;
-
-                RefreshLiveProfile();
-                controller.ApplyProfile(liveProfile);
-
-                var resolvedActionId = ActionManager.GetSpellIdForAction(actionType, actionID);
-                var context = GetCurrentContext();
-                RecordCapture(new TimingActionRequestTraceEvent(CaptureTimelineNow, resolvedActionId, manager->currentSequence, context, TimingActionKind.Instant, manager->animationLock, true));
-                ApplyResult(controller.ProcessActionRequest(TimelineNow, resolvedActionId, manager->currentSequence, context, TimingActionKind.Instant, manager->animationLock, true));
-            });
-
-        private unsafe void UseActionLocation(nint actionManager, uint actionType, uint actionID, ulong targetedActorID, nint vectorLocation, uint param, byte ret)
-            => GuardHotPath(nameof(UseActionLocation), () =>
-            {
-                var manager = Game.actionManager;
-                if (ret == 0 || manager == null)
-                    return;
-
-                RefreshLiveProfile();
-                controller.ApplyProfile(liveProfile);
-
-                var resolvedActionId = ActionManager.GetSpellIdForAction((ActionType)actionType, actionID);
-                var context = GetCurrentContext();
-                RecordCapture(new TimingActionRequestTraceEvent(CaptureTimelineNow, resolvedActionId, manager->currentSequence, context, TimingActionKind.Instant, manager->animationLock, true));
-                ApplyResult(controller.ProcessActionRequest(TimelineNow, resolvedActionId, manager->currentSequence, context, TimingActionKind.Instant, manager->animationLock, true));
-            });
-
-        private unsafe void CastBegin(ulong objectID, nint packetData)
-            => GuardHotPath(nameof(CastBegin), () =>
-            {
-                var actionManager = Game.actionManager;
-                if (actionManager == null || actionManager->castActionId == 0)
-                    return;
-
-                RefreshLiveProfile();
-                controller.ApplyProfile(liveProfile);
-
-                var resolvedActionId = ActionManager.GetSpellIdForAction(actionManager->castActionType, actionManager->castActionId);
-                var context = GetCurrentContext();
-                controller.ProcessCastBegin(resolvedActionId, actionManager->currentSequence, context);
-                RecordCapture(new TimingCastBeginTraceEvent(CaptureTimelineNow, resolvedActionId, actionManager->currentSequence, context));
-            });
-
-        private void CastInterrupt(nint actionManager)
-            => GuardHotPath(nameof(CastInterrupt), () =>
-            {
-                RefreshLiveProfile();
-                controller.ApplyProfile(liveProfile);
-
-                var interruptedActionId = controller.TrackedCastActionId;
-                var interruptedSequence = controller.TrackedCastSequence;
-                var interruptedContext = controller.TrackedCastContext;
-                var result = controller.ProcessCastInterrupt(TimelineNow, interruptedActionId, interruptedSequence);
-                ApplyResult(result);
-                RecordCapture(new TimingCastInterruptTraceEvent(CaptureTimelineNow, interruptedActionId, interruptedSequence, interruptedContext));
-            });
-
-        private unsafe void ReceiveActionEffect(uint casterEntityId, Character* casterPtr, Vector3* targetPos, ActionEffectHandler.Header* header, ActionEffectHandler.TargetEffects* effects, FFXIVClientStructs.FFXIV.Client.Game.Object.GameObjectId* targetEntityIds, float oldLock, float newLock)
-            => GuardHotPath(nameof(ReceiveActionEffect), () =>
-            {
-                if ((nint)casterPtr != DalamudApi.ObjectTable.LocalPlayer?.Address)
-                    return;
-
-                RefreshLiveProfile();
-                controller.ApplyProfile(liveProfile);
-
-                var context = GetCurrentContext();
-                RecordCapture(new TimingActionEffectTraceEvent(CaptureTimelineNow, header->SpellId, header->SourceSequence, context, oldLock, newLock, header->AnimationLock));
-                ApplyResult(controller.ProcessActionEffect(TimelineNow, header->SpellId, header->SourceSequence, context, oldLock, newLock, header->AnimationLock));
-            });
-
-        private void NetworkMessage(nint packet)
-            => GuardHotPath(nameof(NetworkMessage), () =>
-            {
-                controller.ProcessNetworkPacket(TimingPacketClass.Unknown);
-                RecordCapture(new TimingNetworkPacketTraceEvent(CaptureTimelineNow, TimingPacketClass.Unknown));
-            });
-
-        private void Update()
-            => GuardHotPath(nameof(Update), HandleUpdate);
-
-        private unsafe void HandleUpdate()
-        {
-            RefreshLiveProfile();
-            controller.ApplyProfile(liveProfile);
-
-            var actionManager = Game.actionManager;
-            var deltaSeconds = (float)DalamudApi.Framework.UpdateDelta.TotalSeconds;
-            var inCombat = DalamudApi.Condition[ConditionFlag.InCombat];
-            var betweenAreas = DalamudApi.Condition[ConditionFlag.BetweenAreas];
-            var localPlayerId = DalamudApi.ObjectTable.LocalPlayer?.GameObjectId is { } gameObjectId ? (long?)gameObjectId : null;
-            var hasActiveCast = actionManager != null && actionManager->castActionId != 0;
-            var castRemaining = hasActiveCast ? Math.Max(actionManager->castTime - actionManager->elapsedCastTime, 0f) : 0f;
-            var currentAnimationLock = actionManager != null ? actionManager->animationLock : 0f;
-
-            RecordCapture(new TimingAdvanceTraceEvent(
-                CaptureTimelineNow,
-                deltaSeconds,
-                inCombat,
-                betweenAreas,
-                localPlayerId,
-                GetCurrentContext(),
-                hasActiveCast,
-                castRemaining,
-                currentAnimationLock));
-
-            ApplyResult(controller.ProcessUpdate(TimelineNow, deltaSeconds, betweenAreas, localPlayerId, hasActiveCast, castRemaining, currentAnimationLock));
-
-            outOfCombatIdleTimer = inCombat ? 0f : outOfCombatIdleTimer + deltaSeconds;
-            if ((saveLearnedData || saveRuntimeStats) && ShouldFlushConfigSave(inCombat))
-            {
-                Config.Save(checkModules: false);
-                ResetDirtySaveState();
-            }
-        }
-
-        public string StartTraceCapture(string label)
-        {
-            if (captureSession != null)
-                return $"Trace capture already running: {captureSession.Trace.Metadata.Label}";
-
-            RefreshLiveProfile();
-            controller.ApplyProfile(liveProfile);
-
-            BeginTraceCapture(
-                BuildCaptureMetadata(
-                    string.IsNullOrWhiteSpace(label) ? "live-capture" : label.Trim(),
-                    string.Empty,
-                    TimingTraceScenarioBucket.Unspecified,
-                    string.Empty,
-                    null,
-                    "live-capture"),
-                string.Empty);
-            return $"Started timing trace capture '{captureSession.Trace.Metadata.Label}'.";
-        }
-
-        public string StartCorpusTraceCapture(string traceId)
-        {
-            if (captureSession != null)
-                return $"Trace capture already running: {captureSession.Trace.Metadata.Label}";
-            if (string.IsNullOrWhiteSpace(traceId))
-                return $"Usage: /tsunippy corpus-start <trace-id> (manifest: {TimingTraceCorpusPaths.DefaultManifestPath})";
-
-            var manifestPath = TimingTraceCorpusPaths.DefaultManifestPath;
-            if (!File.Exists(manifestPath))
-                return $"Corpus manifest not found at {manifestPath}. Run /tsunippy corpus-init first.";
-
-            var corpus = TimingTraceCorpusJson.Load(manifestPath);
-            var entry = corpus.Entries.Find(candidate => string.Equals(candidate.TraceId, traceId.Trim(), StringComparison.OrdinalIgnoreCase));
-            if (entry == null)
-                return $"Trace '{traceId}' was not found in {manifestPath}.";
-
-            RefreshLiveProfile();
-            controller.ApplyProfile(liveProfile);
-
-            var corpusRoot = TimingTraceCorpusPaths.ResolveCorpusRoot(manifestPath);
-            BeginTraceCapture(
-                BuildCaptureMetadata(entry.Name, entry.TraceId, entry.ScenarioBucket, entry.Purpose, entry.Tags, "live-corpus-capture"),
-                TimingTraceCorpusPaths.ResolveTracePath(corpusRoot, entry));
-            captureCorpusTraceId = entry.TraceId;
-            return $"Started corpus trace capture '{entry.TraceId}' ({entry.Name}).";
-        }
-
-        public string InitializeDefaultTraceCorpus()
-        {
-            var manifestPath = TimingTraceCorpusPaths.DefaultManifestPath;
-            if (File.Exists(manifestPath))
-                return $"Corpus manifest already exists at {manifestPath}";
-
-            var scaffoldedManifest = TimingTraceCorpusFactory.ScaffoldRecommendedV1(TimingTraceCorpusPaths.DefaultRoot);
-            return $"Initialized the default trace corpus scaffold at {scaffoldedManifest}";
-        }
-
-        public string StopTraceCapture()
-        {
-            if (captureSession == null)
-                return "No timing trace capture is currently active.";
-
-            var completedSession = captureSession;
-            var savePath = captureSavePath;
-            var corpusTraceId = captureCorpusTraceId;
-            captureSession = null;
-            captureSavePath = string.Empty;
-            captureCorpusTraceId = string.Empty;
-
-            var path = string.IsNullOrEmpty(savePath)
-                ? completedSession.SaveToDirectory(GetTraceDirectory())
-                : completedSession.SaveToPath(savePath);
-            LastCapturePath = path;
-            if (!string.IsNullOrEmpty(corpusTraceId))
-                UpdateCorpusCaptureRecord(corpusTraceId, completedSession.Trace.Metadata.PluginVersion);
-            return $"Saved timing trace to {path}";
-        }
-
-        public string AddTraceCaptureNote(string note)
-        {
-            if (captureSession == null)
-                return "No timing trace capture is currently active.";
-
-            captureSession.AddNote(CaptureTimelineNow, note);
-            return "Added a note to the active timing trace.";
-        }
-
-        public string RunLabSelfTest()
-        {
-            var trace = SyntheticTimingTraceFactory.CreateSample();
-            var analysis = TimingReplayRunner.Analyze(trace);
-            var baseline = TimingReplayRunner.Analyze(trace, TimingControllerProfile.CreateBaseline());
-            var comparison = Runtime.Evaluation.TimingReplayEvaluator.Compare(analysis.Replay, baseline.Replay);
-            var equivalence = analysis.Equivalence?.IsEquivalent == true ? "equivalent" : "diverged";
-            return $"Lab self-test {equivalence}, fingerprint {analysis.Replay.DecisionFingerprint[..12]}, baseline disagreement delta {comparison.DisagreementDeltaMs:F2} ms.";
-        }
-
-        private void BeginTraceCapture(TimingTraceMetadata metadata, string savePath)
-        {
-            captureStartTimelineSeconds = TimelineNow;
-            captureTruncationNotified = false;
-            captureSavePath = savePath ?? string.Empty;
-            captureCorpusTraceId = metadata?.CorpusTraceId ?? string.Empty;
-            captureSession = new TimingTraceCaptureSession(
-                liveProfile,
-                controller.ExportKnowledge(),
-                metadata ?? new TimingTraceMetadata
-                {
-                    Label = "live-capture",
-                    PluginVersion = typeof(Tsunippy).Assembly.GetName().Version?.ToString() ?? "unknown",
-                });
-
-            ApplyResult(controller.ResetRuntime(TimelineNow, RuntimeResetReason.Manual, "Trace capture start.", true, true));
-            RecordCapture(new TimingRuntimeResetTraceEvent(0d, RuntimeResetReason.Manual, new TimingResetSemantics(true, true), "Trace capture start."));
-        }
-
-        private static TimingTraceMetadata BuildCaptureMetadata(
-            string label,
-            string corpusTraceId,
-            TimingTraceScenarioBucket bucket,
-            string purpose,
-            System.Collections.Generic.IEnumerable<string> tags,
-            string source)
-            => new()
-            {
-                Label = label ?? string.Empty,
-                CorpusTraceId = corpusTraceId ?? string.Empty,
-                Source = source ?? "live-capture",
-                PluginVersion = typeof(Tsunippy).Assembly.GetName().Version?.ToString() ?? "unknown",
-                ScenarioBucket = bucket,
-                Purpose = purpose ?? string.Empty,
-                Tags = tags == null ? new() : new System.Collections.Generic.List<string>(tags),
-            };
-
-        private void UpdateCorpusCaptureRecord(string traceId, string pluginVersion)
-        {
-            try
-            {
-                var manifestPath = TimingTraceCorpusPaths.DefaultManifestPath;
-                if (!File.Exists(manifestPath))
-                    return;
-
-                var corpus = TimingTraceCorpusJson.Load(manifestPath);
-                var entry = corpus.Entries.Find(candidate => string.Equals(candidate.TraceId, traceId, StringComparison.OrdinalIgnoreCase));
-                if (entry == null)
-                    return;
-
-                entry.LastCapturedUtc = DateTime.UtcNow;
-                entry.LastCapturedPluginVersion = pluginVersion ?? string.Empty;
-                TimingTraceCorpusJson.Save(manifestPath, corpus);
-            }
-            catch (Exception exception)
-            {
-                DalamudApi.LogWarning($"Failed to update corpus capture record for '{traceId}': {exception.Message}");
-            }
-        }
-
-        private unsafe void ApplyResult(TimingControllerEventResult result)
-        {
-            if (result.ShouldWriteAnimationLock && Game.actionManager != null)
-                Game.actionManager->animationLock = result.AnimationLockToWrite;
-
-            if (result.LearnedDataChanged)
-                MarkLearnedDataDirty();
-
-            if (result.RuntimeStatsChanged)
-            {
-                Config.TotalAnimationLockReduction += result.AnimationLockReductionAdded;
-                Config.TotalActionsReduced += result.ActionsReducedAdded;
-                MarkRuntimeStatsDirty();
-            }
-
-            if (result.EnteredConflictQuarantine && !string.IsNullOrEmpty(result.UserMessage))
-                PrintError($"{result.UserMessage} The timing controller switched into quarantine mode.");
-
-            if (captureSession != null && result.Decision.HasValue)
-                captureSession.RecordObservedDecision(result.Decision.Value);
-
-            if (Config.EnableLogging && result.Decision.HasValue)
-                PrintLog(FormatDecisionLog(result.Decision.Value));
-        }
-
-        private void GuardHotPath(string source, Action action)
-        {
-            try
-            {
-                action();
-            }
-            catch (Exception exception)
-            {
-                HandleHotPathFailure(source, exception);
-            }
-        }
-
-        private void HandleHotPathFailure(string source, Exception exception)
-        {
-            hotPathFailureCount++;
-            lastHotPathFailure = $"{source}: {exception.GetType().Name}: {exception.Message}";
-            DalamudApi.LogError($"Timing controller failure in {source}", exception);
-
-            ApplyResult(controller.EnterFailureQuarantine(TimelineNow, lastHotPathFailure));
-            if (captureSession != null)
-                RecordCapture(new TimingRuntimeResetTraceEvent(CaptureTimelineNow, RuntimeResetReason.RuntimeFailure, new TimingResetSemantics(false, false), lastHotPathFailure));
-
-            DalamudApi.ShowNotification("Tsunippy timing runtime entered failure quarantine. Diagnostics now report the last failure.", Dalamud.Interface.ImGuiNotification.NotificationType.Warning);
-        }
-
-        private void RefreshLiveProfile()
-        {
-            liveProfile.Name = "live";
-            liveProfile.Strategy = Config.ControllerStrategy;
-            liveProfile.EnableCastLockPrediction = Config.EnableCastLockPrediction;
-            liveProfile.EnableDryRun = Config.EnableDryRun;
-            liveProfile.LearnAnimationLocks = Config.LearnAnimationLocks;
-            liveProfile.LearnCastTax = Config.LearnCastTax;
-            liveProfile.JKAlpha = Config.JKAlpha;
-            liveProfile.JKBeta = Config.JKBeta;
-            liveProfile.JKK = Config.JKK;
-            liveProfile.DynamicFloorScaling = Config.DynamicFloorScaling;
-            liveProfile.DynamicFloorWindow = Config.DynamicFloorWindow;
-            liveProfile.DefaultActionLock = TimingMath.DefaultActionAnimationLock;
-            liveProfile.DefaultCasterTax = Config.DefaultCasterTax;
-            liveProfile.ExistingActionLockThreshold = TimingMath.DefaultActionAnimationLock + TimingMath.LockEqualityEpsilon;
-            liveProfile.ExistingCastLockThreshold = TimingMath.LockEqualityEpsilon;
-            liveProfile.MinimumPredictionConfidence = 0.15f;
-            liveProfile.CastCompletionWindow = TimingMath.CastCompletionWindow;
-        }
-
-        private static GameContext GetCurrentContext()
-        {
-            try
-            {
-                return DalamudApi.ClientState.IsPvP ? GameContext.PvP : GameContext.PvE;
-            }
-            catch
-            {
-                return GameContext.PvE;
-            }
-        }
-
-        private double TimelineNow => runtimeClock.Elapsed.TotalSeconds;
-        private double CaptureTimelineNow => captureSession == null ? 0d : Math.Max(TimelineNow - captureStartTimelineSeconds, 0d);
-
-        private void RecordCapture(TimingTraceEvent traceEvent)
-        {
-            if (captureSession == null || traceEvent == null)
-                return;
-
-            captureSession.Record(traceEvent);
-            if (captureSession.IsTruncated && !captureTruncationNotified)
-            {
-                captureTruncationNotified = true;
-                DalamudApi.ShowNotification("Tsunippy trace capture hit the event cap and will save as a truncated trace.", Dalamud.Interface.ImGuiNotification.NotificationType.Warning);
-            }
-        }
-
-        private static string GetTraceDirectory()
-            => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), "TsunippyLab", "Traces");
-
-        private static string FormatDecisionLog(TimingDecisionTrace trace)
-        {
-            var log = new StringBuilder()
-                .Append("t+").Append(trace.TimelineSeconds.ToString("F3")).Append("s")
-                .Append(" | ").Append(trace.Mode)
-                .Append(" | ").Append(trace.Source).Append('/').Append(trace.Reason)
-                .Append(" | ").Append(trace.ActionKind).Append(' ').Append(trace.ActionId)
-                .Append(" seq ").Append(trace.Sequence);
-
-            if (trace.PredictedLock > 0)
-                log.Append($" | pred {F2MS(trace.PredictedLock)} ms");
-            if (trace.ServerLock > 0)
-                log.Append($" | server {F2MS(trace.ServerLock)} ms");
-            if (trace.FinalLock > 0)
-                log.Append($" | final {F2MS(trace.FinalLock)} ms");
-            if (trace.RTT > 0)
-                log.Append($" | rtt {F2MS(trace.RTT)} ms");
-            log.Append($" | conf {trace.PredictionConfidence:P0}");
-            if (!string.IsNullOrEmpty(trace.Note))
-                log.Append(" | ").Append(trace.Note);
-            return log.ToString();
-        }
-
         public override void DrawConfig()
         {
             if (ImGui.Checkbox("Enable Animation Lock Reduction", ref Config.EnableAnimLockComp))
                 Config.Save();
-            PluginUI.SetItemTooltip("Authoritative timing controller for live prediction, replay capture, and deterministic correction.");
+            PluginUI.SetItemTooltip("Modifies the way the game handles animation lock," +
+                "\nsimulating low ping using adaptive RTT estimation." +
+                "\n\nImprovements over NoClippy:" +
+                "\n- Jacobson/Karels RTT estimator (adaptive jitter handling)" +
+                "\n- Dynamic RTT floor (adapts to your datacenter)" +
+                "\n- Graduated packet weight (nuanced spike handling)" +
+                "\n- Context-aware lock database (PvE/PvP separated)");
 
             if (Config.EnableAnimLockComp)
             {
                 ImGui.Columns(2, "AnimlockColumns", false);
+
                 if (ImGui.Checkbox("Enable Logging", ref Config.EnableLogging))
                     Config.Save(checkModules: false);
 
                 ImGui.NextColumn();
-                var dryRun = Config.EnableDryRun;
+
+                var dryRun = IsDryRunEnabled;
                 if (ImGui.Checkbox("Dry Run", ref dryRun))
                 {
                     Config.EnableDryRun = dryRun;
+                    enableAnticheat = false;
                     Config.Save(checkModules: false);
                 }
-                PluginUI.SetItemTooltip("Keeps the timing controller active for measurement and replay capture without writing animation locks.");
+                PluginUI.SetItemTooltip("The plugin will still log and perform calculations,\nbut no in-game values will be overwritten.");
+
                 ImGui.Columns(1);
 
                 if (ImGui.Checkbox("Learn Animation Locks", ref Config.LearnAnimationLocks))
                     Config.Save(checkModules: false);
-                PluginUI.SetItemTooltip("Learns action locks into the live knowledge base used for both runtime control and offline replay.");
-
-                ImGui.TextUnformatted($"Runtime Mode: {CurrentMode}");
-                ImGui.TextUnformatted($"Decision Quality: {CurrentQuality}");
-                if (!string.IsNullOrEmpty(LastSuppressionReason))
-                    ImGui.TextWrapped($"Last Suppression: {LastSuppressionReason}");
-
-                if (ImGui.Button("Reset Runtime State"))
-                {
-                    ApplyResult(controller.ResetRuntime(TimelineNow, RuntimeResetReason.Manual, "Manual runtime reset.", true, true));
-                    RecordCapture(new TimingRuntimeResetTraceEvent(CaptureTimelineNow, RuntimeResetReason.Manual, new TimingResetSemantics(true, true), "Manual runtime reset."));
-                }
-                PluginUI.SetItemTooltip("Clears transient timing state, estimators, and pending decisions without wiping learned knowledge.");
+                PluginUI.SetItemTooltip("Learns per-action lock values from live server responses.\nDisable this if you want to freeze the current learned database.");
 
                 if (ImGui.TreeNode("Advanced RTT Settings"))
                 {
+                    ImGui.TextUnformatted("Jacobson/Karels Parameters");
+                    ImGui.Indent();
+
                     var alpha = Config.JKAlpha;
                     if (ImGui.SliderFloat("Alpha (SRTT smoothing)", ref alpha, 0.01f, 0.5f, "%.3f"))
                     {
                         Config.JKAlpha = alpha;
                         Config.Save(checkModules: false);
                     }
+                    PluginUI.SetItemTooltip("Controls how quickly the smoothed RTT adapts to new samples.\nLower = more stable, higher = more responsive.\nDefault: 0.125 (RFC 6298)");
 
                     var beta = Config.JKBeta;
                     if (ImGui.SliderFloat("Beta (Variance smoothing)", ref beta, 0.01f, 0.5f, "%.3f"))
@@ -599,6 +364,7 @@ namespace Tsunippy.Modules
                         Config.JKBeta = beta;
                         Config.Save(checkModules: false);
                     }
+                    PluginUI.SetItemTooltip("Controls how quickly the RTT variance adapts.\nLower = more stable variance, higher = more reactive to jitter.\nDefault: 0.25 (RFC 6298)");
 
                     var k = Config.JKK;
                     if (ImGui.SliderFloat("K (Variance multiplier)", ref k, 0.5f, 4.0f, "%.2f"))
@@ -606,6 +372,12 @@ namespace Tsunippy.Modules
                         Config.JKK = k;
                         Config.Save(checkModules: false);
                     }
+                    PluginUI.SetItemTooltip("Multiplier on RTT variance for the safety buffer.\nHigher = more conservative (less clipping risk).\nLower = more aggressive (tighter locks).\nDefault: 2.0");
+
+                    ImGui.Unindent();
+                    ImGui.Spacing();
+                    ImGui.TextUnformatted("Dynamic Floor Parameters");
+                    ImGui.Indent();
 
                     var scaling = Config.DynamicFloorScaling;
                     if (ImGui.SliderFloat("Floor Scaling", ref scaling, 0.5f, 1.0f, "%.2f"))
@@ -613,14 +385,9 @@ namespace Tsunippy.Modules
                         Config.DynamicFloorScaling = scaling;
                         Config.Save(checkModules: false);
                     }
+                    PluginUI.SetItemTooltip("Floor = MinRTT * ScalingFactor.\nLower = more aggressive (floor drops further below min RTT).\nHigher = more conservative.\nDefault: 0.85");
 
-                    var strategyIndex = (int)Config.ControllerStrategy;
-                    if (ImGui.Combo("Controller Strategy", ref strategyIndex, "Confidence Adaptive\0Variance Only\0"))
-                    {
-                        Config.ControllerStrategy = (TimingControllerStrategy)strategyIndex;
-                        Config.Save(checkModules: false);
-                    }
-                    PluginUI.SetItemTooltip("Confidence Adaptive is the frontier controller. Variance Only is a simpler baseline suited for side-by-side lab comparison.");
+                    ImGui.Unindent();
 
                     if (ImGui.Button("Reset to Defaults"))
                     {
@@ -628,9 +395,8 @@ namespace Tsunippy.Modules
                         Config.JKBeta = 0.25f;
                         Config.JKK = 2.0f;
                         Config.DynamicFloorScaling = 0.85f;
-                        Config.ControllerStrategy = TimingControllerStrategy.ConfidenceAdaptive;
-                        ApplyResult(controller.ResetRuntime(TimelineNow, RuntimeResetReason.Manual, "Advanced parameters reset to defaults.", true, true));
-                        RecordCapture(new TimingRuntimeResetTraceEvent(CaptureTimelineNow, RuntimeResetReason.Manual, new TimingResetSemantics(true, true), "Advanced parameters reset to defaults."));
+                        rttEstimator.Reset();
+                        dynamicFloor.Reset();
                         Config.Save(checkModules: false);
                     }
 
@@ -638,38 +404,9 @@ namespace Tsunippy.Modules
                     if (ImGui.Button("Reset Learned Locks"))
                     {
                         Config.LockDb.Reset();
-                        Config.CastTaxDb.Reset();
-                        controller = new TimingControllerEngine(liveProfile, Config.LockDb, Config.CastTaxDb, 16);
                         Config.Save(checkModules: false);
                     }
-
-                    ImGui.TreePop();
-                }
-
-                if (ImGui.TreeNode("Controller Lab"))
-                {
-                    if (captureSession == null)
-                    {
-                        if (ImGui.Button("Start Trace Capture"))
-                            PrintEcho(StartTraceCapture("manual-ui"));
-                    }
-                    else
-                    {
-                        if (ImGui.Button("Stop Trace Capture"))
-                            PrintEcho(StopTraceCapture());
-                    }
-
-                    ImGui.TextUnformatted($"Capture Active: {IsCaptureActive}");
-                    ImGui.TextUnformatted($"Captured Events: {CaptureEventCount}");
-                    if (!string.IsNullOrEmpty(CaptureLabel))
-                        ImGui.TextWrapped($"Trace Label: {CaptureLabel}");
-                    if (!string.IsNullOrEmpty(LastCapturePath))
-                        ImGui.TextWrapped($"Last Trace: {LastCapturePath}");
-                    if (CaptureTruncated)
-                        ImGui.TextWrapped("Current trace is truncated due to the capture event cap.");
-
-                    if (ImGui.Button("Run Lab Self-Test"))
-                        PrintEcho(RunLabSelfTest());
+                    PluginUI.SetItemTooltip("Clears the learned per-action lock database.");
 
                     ImGui.TreePop();
                 }
@@ -684,18 +421,25 @@ namespace Tsunippy.Modules
             pendingLearnedEntries++;
         }
 
-        private void MarkRuntimeStatsDirty() => saveRuntimeStats = true;
+        private void MarkRuntimeStatsDirty()
+        {
+            saveRuntimeStats = true;
+        }
 
         private bool ShouldFlushConfigSave(bool inCombat)
         {
             if (DalamudApi.Condition[ConditionFlag.BetweenAreas])
                 return true;
+
             if (inCombat)
                 return false;
 
             if (saveLearnedData)
             {
-                var learnedDelay = pendingLearnedEntries >= SaveFlushBatchSize ? LearnedBatchSaveIdleDelay : LearnedSaveIdleDelay;
+                var learnedDelay = pendingLearnedEntries >= SaveFlushBatchSize
+                    ? LearnedBatchSaveIdleDelay
+                    : LearnedSaveIdleDelay;
+
                 if (outOfCombatIdleTimer >= learnedDelay)
                     return true;
             }
@@ -711,6 +455,9 @@ namespace Tsunippy.Modules
             pendingLearnedEntries = 0;
         }
 
-        public void NotifyLearnedDataChanged() => MarkLearnedDataDirty();
+        public void NotifyLearnedDataChanged()
+        {
+            MarkLearnedDataDirty();
+        }
     }
 }

@@ -51,16 +51,10 @@ namespace Tsunippy
         }
 
         [Command("/tsunippy")]
-        [HelpMessage("/tsunippy [on|off|toggle|dry|diag|capture-start|capture-stop|capture-note|corpus-init|corpus-start|corpus-stop|lab-status|lab-selftest|help] - Toggles the config window if no option is specified.")]
+        [HelpMessage("/tsunippy [on|off|toggle|dry|diag|help] - Toggles the config window if no option is specified.")]
         private void OnTsunippy(string command, string argument)
         {
-            var trimmed = argument?.Trim() ?? string.Empty;
-            var separator = trimmed.IndexOf(' ');
-            var verb = separator >= 0 ? trimmed[..separator] : trimmed;
-            var remainder = separator >= 0 ? trimmed[(separator + 1)..].Trim() : string.Empty;
-            var animationLock = Modules.Modules.GetInstance<Modules.AnimationLock>();
-
-            switch (verb)
+            switch (argument)
             {
                 case "on":
                 case "toggle" when !Config.EnableAnimLockComp:
@@ -91,88 +85,6 @@ namespace Tsunippy
                     PrintEcho($"Diagnostics overlay is now {(Config.EnableDiagnostics ? "enabled" : "disabled")}.");
                     break;
 
-                case "capture-start":
-                    if (animationLock == null)
-                    {
-                        PrintError("Animation lock module is not available.");
-                        break;
-                    }
-
-                    PrintEcho(animationLock.StartTraceCapture(string.IsNullOrWhiteSpace(remainder) ? "manual-command" : remainder));
-                    break;
-
-                case "capture-stop":
-                    if (animationLock == null)
-                    {
-                        PrintError("Animation lock module is not available.");
-                        break;
-                    }
-
-                    PrintEcho(animationLock.StopTraceCapture());
-                    break;
-
-                case "capture-note":
-                    if (animationLock == null)
-                    {
-                        PrintError("Animation lock module is not available.");
-                        break;
-                    }
-
-                    PrintEcho(animationLock.AddTraceCaptureNote(string.IsNullOrWhiteSpace(remainder) ? "manual note" : remainder));
-                    break;
-
-                case "corpus-init":
-                    if (animationLock == null)
-                    {
-                        PrintError("Animation lock module is not available.");
-                        break;
-                    }
-
-                    PrintEcho(animationLock.InitializeDefaultTraceCorpus());
-                    break;
-
-                case "corpus-start":
-                    if (animationLock == null)
-                    {
-                        PrintError("Animation lock module is not available.");
-                        break;
-                    }
-
-                    PrintEcho(animationLock.StartCorpusTraceCapture(remainder));
-                    break;
-
-                case "corpus-stop":
-                    if (animationLock == null)
-                    {
-                        PrintError("Animation lock module is not available.");
-                        break;
-                    }
-
-                    PrintEcho(animationLock.StopTraceCapture());
-                    break;
-
-                case "lab-status":
-                    if (animationLock == null)
-                    {
-                        PrintError("Animation lock module is not available.");
-                        break;
-                    }
-
-                    PrintEcho(animationLock.IsCaptureActive
-                        ? $"Capture '{animationLock.CaptureLabel}' is active with {animationLock.CaptureEventCount} events{(string.IsNullOrEmpty(animationLock.CaptureTraceId) ? string.Empty : $" (corpus trace {animationLock.CaptureTraceId})")}."
-                        : $"No active capture. Last trace: {(string.IsNullOrEmpty(animationLock.LastCapturePath) ? "none" : animationLock.LastCapturePath)}");
-                    break;
-
-                case "lab-selftest":
-                    if (animationLock == null)
-                    {
-                        PrintError("Animation lock module is not available.");
-                        break;
-                    }
-
-                    PrintEcho(animationLock.RunLabSelfTest());
-                    break;
-
                 case "":
                     ConfigUI.ToggleVisible();
                     break;
@@ -182,14 +94,6 @@ namespace Tsunippy
                         "\n  on / off / toggle - Enable or disable animation lock compensation." +
                         "\n  dry - Toggle dry run (calculations only, no lock overrides)." +
                         "\n  diag - Toggle the real-time diagnostics overlay." +
-                        "\n  capture-start [label] - Start a normalized controller trace capture." +
-                        "\n  capture-stop - Stop capture and save the trace." +
-                        "\n  capture-note <text> - Add a note to the active trace." +
-                        "\n  corpus-init - Scaffold the default real-trace corpus manifest under Documents." +
-                        "\n  corpus-start <trace-id> - Start a capture for a named corpus trace." +
-                        "\n  corpus-stop - Stop the active capture and save it into the corpus layout." +
-                        "\n  lab-status - Show trace capture status." +
-                        "\n  lab-selftest - Run the offline controller lab against a synthetic trace." +
                         "\n  (no args) - Open the configuration window.");
                     break;
             }

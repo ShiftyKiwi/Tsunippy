@@ -168,7 +168,7 @@ namespace Tsunippy
 
         // ==================== Framework Update ====================
         public static event Action OnUpdate;
-        public static void Update() => DispatchUpdate();
+        public static void Update() => OnUpdate?.Invoke();
 
         // ==================== Disposal ====================
         public static void Dispose()
@@ -203,8 +203,6 @@ namespace Tsunippy
             actionManager = null;
             IsInitialized = false;
             EnabledHookCount = 0;
-            RuntimeFailureCount = 0;
-            LastRuntimeFailure = string.Empty;
         }
 
         private static void DispatchUseAction(ActionManager* thisPtr, ActionType actionType, uint actionId, ulong targetId, uint extraParam, ActionManager.UseActionMode mode, uint comboRouteId, bool* outOptAreaTargeted, bool ret)
@@ -221,6 +219,7 @@ namespace Tsunippy
                 }
                 catch (Exception exception)
                 {
+                    OnUseAction -= handler;
                     RecordRuntimeFailure(nameof(OnUseAction), handler, exception);
                 }
             }
@@ -240,6 +239,7 @@ namespace Tsunippy
                 }
                 catch (Exception exception)
                 {
+                    OnUseActionLocation -= handler;
                     RecordRuntimeFailure(nameof(OnUseActionLocation), handler, exception);
                 }
             }
@@ -259,6 +259,7 @@ namespace Tsunippy
                 }
                 catch (Exception exception)
                 {
+                    OnCastBegin -= handler;
                     RecordRuntimeFailure(nameof(OnCastBegin), handler, exception);
                 }
             }
@@ -278,6 +279,7 @@ namespace Tsunippy
                 }
                 catch (Exception exception)
                 {
+                    OnCastInterrupt -= handler;
                     RecordRuntimeFailure(nameof(OnCastInterrupt), handler, exception);
                 }
             }
@@ -297,6 +299,7 @@ namespace Tsunippy
                 }
                 catch (Exception exception)
                 {
+                    OnReceiveActionEffect -= handler;
                     RecordRuntimeFailure(nameof(OnReceiveActionEffect), handler, exception);
                 }
             }
@@ -316,26 +319,8 @@ namespace Tsunippy
                 }
                 catch (Exception exception)
                 {
+                    OnNetworkMessageDelegate -= handler;
                     RecordRuntimeFailure(nameof(OnNetworkMessageDelegate), handler, exception);
-                }
-            }
-        }
-
-        private static void DispatchUpdate()
-        {
-            var handlers = OnUpdate;
-            if (handlers == null)
-                return;
-
-            foreach (Action handler in handlers.GetInvocationList())
-            {
-                try
-                {
-                    handler();
-                }
-                catch (Exception exception)
-                {
-                    RecordRuntimeFailure(nameof(OnUpdate), handler, exception);
                 }
             }
         }

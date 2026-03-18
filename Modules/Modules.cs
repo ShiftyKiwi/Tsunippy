@@ -3,7 +3,6 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
 using Dalamud.Bindings.ImGui;
-using Tsunippy.Runtime;
 
 namespace Tsunippy.Modules
 {
@@ -28,25 +27,16 @@ namespace Tsunippy.Modules
         {
             if (isInitialized) return;
 
-            var discoveredModules = Assembly.GetExecutingAssembly().GetTypes()
-                .Where(t => t.IsSubclassOf(typeof(Module)) && !t.IsAbstract)
-                .Select(type => new { type, module = (Module)Activator.CreateInstance(type) })
-                .Where(entry => entry.module != null)
-                .OrderBy(entry => entry.module.DrawOrder)
-                .ThenBy(entry => entry.type.FullName, StringComparer.Ordinal)
-                .ToArray();
-
-            foreach (var entry in discoveredModules)
+            foreach (var t in Assembly.GetExecutingAssembly().GetTypes().Where(t => t.IsSubclassOf(typeof(Module)) && !t.IsAbstract))
             {
-                var t = entry.type;
-                var module = entry.module;
+                var module = (Module)Activator.CreateInstance(t);
+                if (module == null) continue;
                 var info = new ModuleInfo { module = module, isEnabled = module.IsEnabled };
 
                 if (module.IsEnabled)
                 {
                     try
                     {
-                        module.ResetRuntime(RuntimeResetReason.Enable);
                         module.Enable();
                         DalamudApi.LogInfo($"Loaded module: {module.GetType()}");
                     }
@@ -62,16 +52,6 @@ namespace Tsunippy.Modules
                         {
                             DalamudApi.LogError($"Failed rolling back module: {module.GetType()}\n{disableException}");
                         }
-
-                        try
-                        {
-                            module.ResetRuntime(RuntimeResetReason.RuntimeFailure);
-                        }
-                        catch (Exception resetException)
-                        {
-                            DalamudApi.LogError($"Failed resetting module after startup rollback: {module.GetType()}\n{resetException}");
-                        }
-
                         module.IsEnabled = false;
                         info.isEnabled = false;
                     }
@@ -80,7 +60,7 @@ namespace Tsunippy.Modules
                 modules.Add(t, info);
             }
 
-            drawOrder = modules.Values.OrderBy(info => info.module.DrawOrder).ThenBy(info => info.module.GetType().FullName, StringComparer.Ordinal);
+            drawOrder = modules.Values.OrderBy(info => info.module.DrawOrder);
             isInitialized = true;
         }
 
@@ -101,7 +81,7 @@ namespace Tsunippy.Modules
         {
             if (!isInitialized || isDisposing) return;
 
-            foreach (var (_, info) in modules.OrderBy(kv => kv.Value.module.DrawOrder).ThenBy(kv => kv.Key.FullName, StringComparer.Ordinal))
+            foreach (var (_, info) in modules)
             {
                 var module = info.module;
                 if (module.IsEnabled == info.isEnabled) continue;
@@ -110,14 +90,12 @@ namespace Tsunippy.Modules
                 {
                     if (module.IsEnabled)
                     {
-                        module.ResetRuntime(RuntimeResetReason.ModuleStateChange);
                         module.Enable();
                         DalamudApi.LogInfo($"Enabled module: {module.GetType()}");
                     }
                     else
                     {
                         module.Disable();
-                        module.ResetRuntime(RuntimeResetReason.Disable);
                         DalamudApi.LogInfo($"Disabled module: {module.GetType()}");
                     }
 
@@ -152,22 +130,6 @@ namespace Tsunippy.Modules
                 return;
 
             UpdateFailureState(info, exception, source);
-            try
-            {
-                info.module.ResetRuntime(RuntimeResetReason.RuntimeFailure);
-            }
-            catch (Exception resetException)
-            {
-                DalamudApi.LogError($"Module runtime reset failed after runtime error: {info.module.GetType()}\n{resetException}");
-            }
-
-            if (!info.module.DisableOnRuntimeFailure)
-            {
-                DalamudApi.ShowNotification(
-                    $"{info.module.GetType().Name} entered recovery after a runtime failure in {source}.",
-                    Dalamud.Interface.ImGuiNotification.NotificationType.Warning);
-                return;
-            }
 
             if (!info.isEnabled)
                 return;
@@ -208,7 +170,6 @@ namespace Tsunippy.Modules
                 try
                 {
                     info.module.Disable();
-                    info.module.ResetRuntime(RuntimeResetReason.Disable);
                     info.isEnabled = false;
                 }
                 catch (Exception e)
@@ -233,14 +194,7 @@ namespace Tsunippy.Modules
             {
                 if (!first)
                     ImGui.Separator();
-                try
-                {
-                    info.module.DrawConfig();
-                }
-                catch (Exception exception)
-                {
-                    HandleRuntimeFailure(info.module, "DrawConfig", exception);
-                }
+                info.module.DrawConfig();
                 first = false;
             }
         }

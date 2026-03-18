@@ -1,4 +1,3 @@
-using System;
 using System.Numerics;
 using Dalamud.Bindings.ImGui;
 using Dalamud.Interface.Utility;
@@ -84,26 +83,8 @@ namespace Tsunippy.Modules
             DrawStatRow("Adjusted Lock", $"{F2MS(animLock.LastAdjustedLock)} ms", green);
             DrawStatRow("Packets (50ms)", $"{animLock.PacketsSent}", gray);
             DrawStatRow("Action Packets", $"{animLock.ActionPacketsSent}", gray);
-            DrawStatRow("Pending Predictions", $"{animLock.PendingPredictionCount}", gray);
-            DrawStatRow("Cast Stage", $"{animLock.CastStage}", gray);
-
-            ImGui.Spacing();
-            ImGui.TextColored(yellow, "Decision Engine");
-            ImGui.Separator();
-            DrawStatRow("Runtime Mode", $"{animLock.CurrentMode}", animLock.IsDryRunEnabled ? yellow : green);
-            DrawStatRow("Decision Quality", $"{animLock.CurrentQuality}", animLock.CurrentQuality is Runtime.TimingQuality.Stable or Runtime.TimingQuality.Adaptive ? green : yellow);
-            DrawStatRow("Decision Source", $"{animLock.LastDecisionSource}", white);
-            DrawStatRow("Decision Reason", $"{animLock.LastDecisionReason}", white);
-            DrawStatRow("Confidence", $"{animLock.LastPredictionConfidence:P0}", white);
             DrawStatRow("Pending Saves", $"{animLock.PendingLearnedEntries}", gray);
-            DrawStatRow("Capture Active", animLock.IsCaptureActive ? "Yes" : "No", animLock.IsCaptureActive ? green : gray);
-            DrawStatRow("Trace Events", $"{animLock.CaptureEventCount}", gray);
-            if (!string.IsNullOrEmpty(animLock.LastDecisionNote))
-                ImGui.TextWrapped($"Decision note: {animLock.LastDecisionNote}");
-            if (!string.IsNullOrEmpty(animLock.LastSuppressionReason))
-                ImGui.TextWrapped($"Last suppression: {animLock.LastSuppressionReason}");
-            if (!string.IsNullOrEmpty(animLock.LastCapturePath))
-                ImGui.TextWrapped($"Last trace: {animLock.LastCapturePath}");
+            DrawStatRow("Conflict State", animLock.ConflictDetected ? "Dry Run" : "Normal", animLock.ConflictDetected ? yellow : green);
 
             // Database info
             if (animLock.LastActionID != 0)
@@ -135,15 +116,10 @@ namespace Tsunippy.Modules
             ImGui.Separator();
             DrawStatRow("Hooks Ready", $"{Game.EnabledHookCount}/{Game.ExpectedHookCount}", Game.IsInitialized ? green : yellow);
             DrawStatRow("Runtime Failures", $"{Game.RuntimeFailureCount}", Game.RuntimeFailureCount == 0 ? green : yellow);
-            DrawStatRow("Controller Failures", $"{animLock.HotPathFailureCount}", animLock.HotPathFailureCount == 0 ? green : yellow);
             if (!string.IsNullOrEmpty(Game.LastInitializationError))
                 ImGui.TextWrapped($"Init error: {Game.LastInitializationError}");
             if (!string.IsNullOrEmpty(Game.LastRuntimeFailure))
                 ImGui.TextWrapped($"Last runtime failure: {Game.LastRuntimeFailure}");
-            if (!string.IsNullOrEmpty(animLock.LastHotPathFailure))
-                ImGui.TextWrapped($"Controller failure: {animLock.LastHotPathFailure}");
-            if (!string.IsNullOrEmpty(animLock.LastRuntimeResetReason))
-                ImGui.TextWrapped($"Last runtime reset: {animLock.LastRuntimeResetReason}");
 
             var statuses = global::Tsunippy.Modules.Modules.GetStatusSnapshot();
             if (statuses.Count > 0)
@@ -156,23 +132,6 @@ namespace Tsunippy.Modules
                     DrawStatRow(status.Name, status.IsEnabled ? "Enabled" : "Disabled", status.IsEnabled ? green : yellow);
                     if (!string.IsNullOrEmpty(status.LastFailure))
                         ImGui.TextWrapped($"  {status.LastFailure}");
-                }
-            }
-
-            var decisions = animLock.GetRecentDecisions();
-            if (decisions.Length > 0)
-            {
-                ImGui.Spacing();
-                ImGui.TextColored(yellow, "Decision Timeline");
-                ImGui.Separator();
-                foreach (var decision in decisions)
-                {
-                    ImGui.TextWrapped(
-                        $"t+{decision.TimelineSeconds:F3}s | {decision.Mode} | {decision.Source}/{decision.Reason} | {decision.ActionKind} {decision.ActionId} | pred {F2MS(decision.PredictedLock)} | final {F2MS(decision.FinalLock)} | rtt {F2MS(decision.RTT)}");
-                    if (decision.Inputs.Floor > 0 || decision.Inputs.VarianceBuffer > 0 || decision.Inputs.ConfidenceGuard > 0)
-                        ImGui.TextWrapped($"  inputs: floor {F2MS(decision.Inputs.Floor)} ms, buffer {F2MS(decision.Inputs.VarianceBuffer)} ms, guard {F2MS(decision.Inputs.ConfidenceGuard)} ms");
-                    if (!string.IsNullOrEmpty(decision.Note))
-                        ImGui.TextWrapped($"  {decision.Note}");
                 }
             }
 

@@ -2,7 +2,6 @@ using System;
 using System.Collections.Generic;
 using Dalamud.Game.ClientState.Conditions;
 using Dalamud.Bindings.ImGui;
-using Tsunippy.Runtime;
 using static Tsunippy.Tsunippy;
 
 namespace Tsunippy
@@ -94,7 +93,7 @@ namespace Tsunippy.Modules
             encounterGCDCount++;
 
             // Filter out cast tax (0.1s is standard caster tax)
-            if (!TimingMath.NearlyEqual(animationLock, Config.DefaultCasterTax, 0.01f))
+            if (animationLock != 0.1f)
             {
                 encounterTotalClip += animationLock;
                 encounterClipCount++;
@@ -188,17 +187,5 @@ namespace Tsunippy.Modules
 
         public override void Enable() => Game.OnUpdate += Update;
         public override void Disable() => Game.OnUpdate -= Update;
-
-        public override void ResetRuntime(RuntimeResetReason reason)
-        {
-            begunEncounter = DateTime.MinValue;
-            lastDetectedClip = 0;
-            currentWastedGCD = 0;
-            encounterTotalClip = 0;
-            encounterTotalWaste = 0;
-            encounterClipCount = 0;
-            encounterGCDCount = 0;
-            perActionClips.Clear();
-        }
     }
 }
