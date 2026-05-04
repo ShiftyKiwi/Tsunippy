@@ -6,8 +6,10 @@
   "Tags": ["jobs", "utility"],
   "CategoryTags": ["Jobs", "Utility"],
   "InternalName": "Tsunippy",
-  "AssemblyVersion": "1.4.0.2",
+  "AssemblyVersion": "1.4.0.3",
   "RepoUrl": "https://github.com/ShiftyKiwi/Tsunippy",
-  "ApplicableVersion": "any"
+  "ApplicableVersion": "any",
+  "DalamudApiLevel": 15,
+  "Changelog": "Updated for FFXIV Patch 7.5 and Dalamud API15."
 }
 

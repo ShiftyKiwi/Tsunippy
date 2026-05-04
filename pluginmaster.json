@@ -4,23 +4,23 @@
         "Name": "Tsunippy",
         "Punchline": "Next-gen animation lock compensation with adaptive RTT estimation.",
         "Description": "Reduces the effects of lag on animation locks, weaving, and cast actions. Features Jacobson/Karels RTT estimation, dynamic latency floor, cast lock prediction, context-aware lock database, and real-time diagnostics. An improved successor to NoClippy.",
-        "Changelog": "Validated for FFXIV Patch 7.45 HotFix Patch 2.",
+        "Changelog": "Updated for FFXIV Patch 7.5 and Dalamud API15.",
         "InternalName": "Tsunippy",
-        "AssemblyVersion": "1.4.0.2",
+        "AssemblyVersion": "1.4.0.3",
         "RepoUrl": "https://github.com/ShiftyKiwi/Tsunippy",
         "ApplicableVersion": "any",
         "Tags": ["jobs", "utility"],
         "CategoryTags": ["Jobs", "Utility"],
-        "DalamudApiLevel": 14,
+        "DalamudApiLevel": 15,
         "IconUrl": "",
         "ImageUrls": [],
-        "DownloadLinkInstall": "https://github.com/ShiftyKiwi/Tsunippy/releases/download/v1.4.0.2/latest.zip",
-        "DownloadLinkUpdate": "https://github.com/ShiftyKiwi/Tsunippy/releases/download/v1.4.0.2/latest.zip",
-        "DownloadLinkTesting": "https://github.com/ShiftyKiwi/Tsunippy/releases/download/v1.4.0.2/latest.zip",
+        "DownloadLinkInstall": "https://github.com/ShiftyKiwi/Tsunippy/releases/download/v1.4.0.3/latest.zip",
+        "DownloadLinkUpdate": "https://github.com/ShiftyKiwi/Tsunippy/releases/download/v1.4.0.3/latest.zip",
+        "DownloadLinkTesting": "https://github.com/ShiftyKiwi/Tsunippy/releases/download/v1.4.0.3/latest.zip",
         "IsHide": false,
         "IsTestingExclusive": false,
         "DownloadCount": 0,
-        "LastUpdate": "1774366970"
+        "LastUpdate": "1777914755"
     }
 ]
 
