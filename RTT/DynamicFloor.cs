@@ -1,4 +1,5 @@
 using System;
+using Tsunippy.Runtime;
 
 namespace Tsunippy.RTT
 {
@@ -18,10 +19,15 @@ namespace Tsunippy.RTT
     public class DynamicFloor
     {
         private readonly float[] samples;
+        private readonly float[] scratch;
         private int head = 0;
         private int count = 0;
         private float cachedMin = float.MaxValue;
+        private float cachedLowPercentile = float.MaxValue;
+        private float cachedFloor = DefaultFloor;
         private bool dirty = true;
+        private FloorMode mode = FloorMode.Balanced;
+        private ConnectionState connectionState = ConnectionState.WarmingUp;
 
         /// <summary>
         /// Scaling factor applied to MinRTT to compute the floor.
@@ -29,6 +35,28 @@ namespace Tsunippy.RTT
         /// This provides a small safety margin below the absolute minimum.
         /// </summary>
         public float ScalingFactor { get; set; } = 0.85f;
+        public FloorMode Mode
+        {
+            get => mode;
+            set
+            {
+                if (mode == value) return;
+                mode = value;
+                dirty = true;
+            }
+        }
+
+        public ConnectionState ConnectionState
+        {
+            get => connectionState;
+            set
+            {
+                if (connectionState == value) return;
+                connectionState = value;
+                dirty = true;
+            }
+        }
+        public string LastAdjustmentReason { get; private set; } = "default floor";
 
         /// <summary>The size of the sliding window (number of RTT samples retained).</summary>
         public int WindowSize => samples.Length;
@@ -39,6 +67,9 @@ namespace Tsunippy.RTT
         /// <summary>Minimum allowed floor to prevent unreasonably aggressive values.</summary>
         public const float MinimumFloor = 0.01f;
 
+        /// <summary>Maximum allowed floor. High-latency paths can rise above NoClippy's 40ms floor, but stay bounded.</summary>
+        public const float MaximumFloor = 0.12f;
+
         /// <summary>
         /// Create a new DynamicFloor tracker.
         /// </summary>
@@ -47,6 +78,7 @@ namespace Tsunippy.RTT
         public DynamicFloor(int windowSize = 100)
         {
             samples = new float[Math.Max(windowSize, 10)];
+            scratch = new float[samples.Length];
         }
 
         /// <summary>Add a new RTT sample to the sliding window.</summary>
@@ -66,16 +98,13 @@ namespace Tsunippy.RTT
             get
             {
                 if (!dirty) return cachedMin;
-                cachedMin = float.MaxValue;
-                for (int i = 0; i < count; i++)
-                {
-                    if (samples[i] < cachedMin)
-                        cachedMin = samples[i];
-                }
-                dirty = false;
+                Recompute();
                 return cachedMin;
             }
         }
+
+        public float RawMinRTT => HasSufficientData ? MinRTT : 0f;
+        public float EffectiveFloor => Floor;
 
         /// <summary>
         /// The computed dynamic floor: MinRTT * ScalingFactor.
@@ -87,10 +116,16 @@ namespace Tsunippy.RTT
             get
             {
                 if (!HasSufficientData)
+                {
+                    cachedFloor = DefaultFloor;
+                    LastAdjustmentReason = "warming up";
                     return DefaultFloor;
+                }
 
-                var computed = MinRTT * ScalingFactor;
-                return Math.Max(Math.Min(computed, DefaultFloor), MinimumFloor);
+                if (dirty)
+                    Recompute();
+
+                return cachedFloor;
             }
         }
 
@@ -106,7 +141,66 @@ namespace Tsunippy.RTT
             head = 0;
             count = 0;
             cachedMin = float.MaxValue;
+            cachedLowPercentile = float.MaxValue;
+            cachedFloor = DefaultFloor;
             dirty = true;
+            LastAdjustmentReason = "reset";
+        }
+
+        private void Recompute()
+        {
+            cachedMin = float.MaxValue;
+            for (var i = 0; i < count; i++)
+            {
+                var sample = samples[i];
+                scratch[i] = sample;
+                if (sample < cachedMin)
+                    cachedMin = sample;
+            }
+
+            Array.Sort(scratch, 0, count);
+            var percentileIndex = Math.Clamp((int)MathF.Round((count - 1) * GetPercentile()), 0, count - 1);
+            cachedLowPercentile = scratch[percentileIndex];
+
+            var effectiveMode = Mode == FloorMode.Auto ? GetAutoMode() : Mode;
+            var previous = cachedFloor;
+            var candidate = effectiveMode switch
+            {
+                FloorMode.Aggressive => cachedMin * ScalingFactor,
+                FloorMode.Safe => Math.Max(cachedMin * 0.95f, cachedLowPercentile * 0.92f),
+                _ => Math.Max(cachedMin * ScalingFactor, cachedLowPercentile * 0.82f),
+            };
+
+            cachedFloor = Math.Clamp(candidate, MinimumFloor, MaximumFloor);
+            LastAdjustmentReason = Math.Abs(cachedFloor - previous) switch
+            {
+                < 0.001f => $"{effectiveMode}: unchanged",
+                _ when cachedFloor > previous => $"{effectiveMode}: sustained RTT floor rose",
+                _ => $"{effectiveMode}: lower bound improved",
+            };
+
+            dirty = false;
+        }
+
+        private float GetPercentile()
+        {
+            var effectiveMode = Mode == FloorMode.Auto ? GetAutoMode() : Mode;
+            return effectiveMode switch
+            {
+                FloorMode.Aggressive => 0.05f,
+                FloorMode.Safe => 0.30f,
+                _ => 0.20f,
+            };
+        }
+
+        private FloorMode GetAutoMode()
+        {
+            return ConnectionState switch
+            {
+                ConnectionState.WarmingUp or ConnectionState.Bursty or ConnectionState.PathShifted => FloorMode.Safe,
+                ConnectionState.Stable => FloorMode.Balanced,
+                _ => FloorMode.Balanced,
+            };
         }
     }
 }

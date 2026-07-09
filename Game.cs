@@ -4,6 +4,7 @@ using Dalamud.Hooking;
 using FFXIVClientStructs.FFXIV.Application.Network;
 using FFXIVClientStructs.FFXIV.Client.Game;
 using FFXIVClientStructs.FFXIV.Client.Game.Character;
+using FFXIVClientStructs.FFXIV.Client.Game.Network;
 using FFXIVClientStructs.FFXIV.Client.Game.Object;
 
 namespace Tsunippy
@@ -51,16 +52,17 @@ namespace Tsunippy
         private static bool invokeCastInterrupt = false;
         private static long castInterruptExpiryTick;
 
-        public delegate void CastBeginDelegate(ulong objectID, nint packetData);
-        public static event CastBeginDelegate OnCastBegin;
+        public delegate void CastBeginEventDelegate(uint casterEntityId, nint packetData);
+        public static event CastBeginEventDelegate OnCastBegin;
 
+        private delegate void CastBeginDelegate(uint casterEntityId, ActorCastPacket* packetData);
         private static Hook<CastBeginDelegate> CastBeginHook;
 
-        private static void CastBeginDetour(ulong objectID, nint packetData)
+        private static void CastBeginDetour(uint casterEntityId, ActorCastPacket* packetData)
         {
-            CastBeginHook.Original(objectID, packetData);
-            if (objectID != DalamudApi.ObjectTable.LocalPlayer?.GameObjectId) return;
-            DispatchCastBegin(objectID, packetData);
+            CastBeginHook.Original(casterEntityId, packetData);
+            if (casterEntityId != DalamudApi.ObjectTable.LocalPlayer?.EntityId) return;
+            DispatchCastBegin(casterEntityId, (nint)packetData);
             invokeCastInterrupt = true;
             castInterruptExpiryTick = Environment.TickCount64 + 2000;
         }
@@ -245,17 +247,17 @@ namespace Tsunippy
             }
         }
 
-        private static void DispatchCastBegin(ulong objectID, nint packetData)
+        private static void DispatchCastBegin(uint casterEntityId, nint packetData)
         {
             var handlers = OnCastBegin;
             if (handlers == null)
                 return;
 
-            foreach (CastBeginDelegate handler in handlers.GetInvocationList())
+            foreach (CastBeginEventDelegate handler in handlers.GetInvocationList())
             {
                 try
                 {
-                    handler(objectID, packetData);
+                    handler(casterEntityId, packetData);
                 }
                 catch (Exception exception)
                 {

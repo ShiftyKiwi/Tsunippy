@@ -27,9 +27,37 @@ namespace Tsunippy.RTT
         public float SmoothedRTT { get; private set; } = -1f;
         public float RTTVariance { get; private set; } = 0f;
         public int SampleCount { get; private set; } = 0;
+        public int CleanSampleCount { get; private set; } = 0;
 
         /// <summary>Whether at least one RTT sample has been recorded.</summary>
         public bool IsInitialized => SmoothedRTT > 0;
+
+        /// <summary>Whether enough clean samples have arrived for full variance trust.</summary>
+        public bool IsWarm => CleanSampleCount >= 10;
+
+        /// <summary>Human-readable maturity bucket for diagnostics and safe-mode decisions.</summary>
+        public string EstimatorMaturity => CleanSampleCount switch
+        {
+            <= 0 => "cold",
+            < 3 => "early",
+            < 6 => "warming",
+            < 10 => "nearly warm",
+            _ => "warm",
+        };
+
+        /// <summary>
+        /// Startup variance can be exaggerated because RFC 6298 initializes RTTVAR at
+        /// half the first sample. Trust it gradually so the first few clean samples do
+        /// correction work without creating a huge safety buffer.
+        /// </summary>
+        public float VarianceTrustFactor => CleanSampleCount switch
+        {
+            <= 0 => 0f,
+            < 3 => 0.15f,
+            < 6 => 0.45f,
+            < 10 => 0.75f,
+            _ => 1f,
+        };
 
         /// <summary>
         /// The predicted network buffer: SRTT + K * RTTVAR.
@@ -38,7 +66,7 @@ namespace Tsunippy.RTT
         /// On jittery connections this expands proportionally to observed variance.
         /// </summary>
         public float PredictedBuffer => IsInitialized
-            ? Math.Max(SmoothedRTT + K * RTTVariance, 0.001f)
+            ? Math.Max(SmoothedRTT + VarianceBuffer, 0.001f)
             : 0f;
 
         /// <summary>
@@ -46,6 +74,10 @@ namespace Tsunippy.RTT
         /// Used as the "network variation" buffer added to lock corrections.
         /// </summary>
         public float VarianceBuffer => IsInitialized
+            ? K * RTTVariance * VarianceTrustFactor
+            : 0f;
+
+        public float RawVarianceBuffer => IsInitialized
             ? K * RTTVariance
             : 0f;
 
@@ -61,6 +93,8 @@ namespace Tsunippy.RTT
             if (rttSample <= 0 || !float.IsFinite(rttSample)) return;
 
             SampleCount++;
+            if (weight >= 0.75f)
+                CleanSampleCount++;
 
             if (!IsInitialized)
             {
@@ -91,6 +125,7 @@ namespace Tsunippy.RTT
             SmoothedRTT = -1f;
             RTTVariance = 0f;
             SampleCount = 0;
+            CleanSampleCount = 0;
         }
     }
 }

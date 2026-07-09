@@ -29,7 +29,8 @@ namespace Tsunippy.Database
             if (!float.IsFinite(entry.MeanLock) || entry.MeanLock < MinimumCastTax || entry.MeanLock > MaximumCastTax)
                 return defaultTax;
 
-            return entry.Confidence >= 0.3f ? entry.MeanLock : defaultTax;
+            RefreshState(entry);
+            return entry.CanUseForPrediction(MinimumCastTax, MaximumCastTax) ? entry.MeanLock : defaultTax;
         }
 
         public bool RecordTax(uint actionID, GameContext context, float lockValue)
@@ -48,8 +49,15 @@ namespace Tsunippy.Database
                     MeanDeviation = 0.005f,
                     SampleCount = 1,
                     LastObservedUnix = now,
+                    State = LearnedEntryState.Learning,
                 };
                 return true;
+            }
+
+            if (!entry.CanLearn)
+            {
+                entry.State = LearnedEntryState.Frozen;
+                return false;
             }
 
             var delta = Math.Abs(entry.MeanLock - lockValue);
@@ -59,14 +67,16 @@ namespace Tsunippy.Database
                 if (delta > allowedDrift)
                 {
                     entry.OutlierStreak++;
+                    entry.State = LearnedEntryState.Shadow;
                     if (entry.OutlierStreak < ResetOutlierThreshold)
                         return false;
 
                     entry.MeanLock = lockValue;
                     entry.MeanDeviation = 0.005f;
-                    entry.SampleCount = Math.Min(entry.SampleCount, 3);
+                    entry.SampleCount = Math.Min(entry.SampleCount, 2);
                     entry.OutlierStreak = 0;
                     entry.LastObservedUnix = now;
+                    entry.State = LearnedEntryState.Learning;
                     return true;
                 }
             }
@@ -78,6 +88,7 @@ namespace Tsunippy.Database
                 if (entry.SampleCount < 1000)
                     entry.SampleCount++;
                 entry.LastObservedUnix = now;
+                RefreshState(entry);
                 return false;
             }
 
@@ -85,12 +96,52 @@ namespace Tsunippy.Database
             entry.MeanLock += (lockValue - entry.MeanLock) / entry.SampleCount;
             entry.MeanDeviation += (delta - entry.MeanDeviation) / entry.SampleCount;
             entry.LastObservedUnix = now;
+            RefreshState(entry);
             return true;
         }
 
         public LockEntry GetEntry(uint actionID, GameContext context)
-            => Entries.TryGetValue(MakeKey(actionID, context), out var entry) ? entry : null;
+        {
+            if (!Entries.TryGetValue(MakeKey(actionID, context), out var entry))
+                return null;
+
+            RefreshState(entry);
+            return entry;
+        }
+
+        public bool ResetEntry(uint actionID, GameContext context)
+            => Entries.Remove(MakeKey(actionID, context));
+
+        public bool SetFrozen(uint actionID, GameContext context, bool frozen)
+        {
+            if (!Entries.TryGetValue(MakeKey(actionID, context), out var entry))
+                return false;
+
+            entry.Frozen = frozen;
+            entry.State = frozen ? LearnedEntryState.Frozen : LearnedEntryState.Learning;
+            RefreshState(entry);
+            return true;
+        }
 
         public void Reset() => Entries.Clear();
+
+        private static void RefreshState(LockEntry entry)
+        {
+            if (entry.Frozen)
+            {
+                entry.State = LearnedEntryState.Frozen;
+                return;
+            }
+
+            if (entry.OutlierStreak > 0)
+            {
+                entry.State = LearnedEntryState.Shadow;
+                return;
+            }
+
+            entry.State = entry.Confidence >= 0.6f
+                ? LearnedEntryState.Trusted
+                : LearnedEntryState.Learning;
+        }
     }
 }

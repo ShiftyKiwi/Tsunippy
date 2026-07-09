@@ -59,32 +59,77 @@ namespace Tsunippy.Modules
             ImGui.TextColored(yellow, "RTT Estimator (Jacobson/Karels)");
             ImGui.Separator();
 
-            DrawStatRow("Smoothed RTT", $"{F2MS(animLock.CurrentSRTT)} ms", animLock.CurrentSRTT > 0 ? green : gray);
-            DrawStatRow("RTT Variance", $"{F2MS(animLock.CurrentRTTVAR)} ms", green);
-            DrawStatRow("Predicted Buffer", $"{F2MS(animLock.CurrentSRTT + Config.JKK * animLock.CurrentRTTVAR)} ms", green);
-            DrawStatRow("Last RTT", $"{F2MS(animLock.LastRTT)} ms", white);
+            DrawStatRow("Smoothed RTT", FormatMs(animLock.CurrentSRTT), animLock.CurrentSRTT > 0 ? green : gray);
+            DrawStatRow("RTT Variance", FormatMs(animLock.CurrentRTTVAR), green);
+            DrawStatRow("Maturity", $"{animLock.EstimatorMaturity} ({animLock.VarianceTrustFactor:P0} variance)", animLock.IsRttWarm ? green : yellow);
+            DrawStatRow("Connection", $"{animLock.ConnectionClassification}", green);
+            DrawStatRow("Last RTT", FormatMs(animLock.LastRTT), white);
             DrawStatRow("RTT Samples", $"{animLock.RTTSampleCount}", gray);
 
             ImGui.Spacing();
             ImGui.TextColored(yellow, "Dynamic Floor");
             ImGui.Separator();
 
-            DrawStatRow("Current Floor", $"{F2MS(animLock.CurrentFloor)} ms", green);
+            DrawStatRow("Current Floor", FormatMs(animLock.CurrentFloor), green);
+            DrawStatRow("Raw Min", FormatMs(animLock.RawMinRTT), gray);
+            DrawStatRow("Mode", $"{animLock.CurrentFloorMode}", white);
+            DrawStatRow("Last Adjust", animLock.LastFloorAdjustmentReason, gray);
             DrawStatRow("Floor Samples", $"{animLock.FloorSampleCount}", gray);
             DrawStatRow("NoClippy Floor", "40 ms", gray);
+
+            ImGui.Spacing();
+            ImGui.TextColored(yellow, "Epoch / Safety");
+            ImGui.Separator();
+            DrawStatRow("Profile", $"{Config.Profile} -> {animLock.EffectiveProfile}", white);
+            DrawStatRow("Epoch", $"{animLock.CurrentEpoch}", white);
+            DrawStatRow("Last Reset", $"{animLock.LastEpochResetReason} ({animLock.TimeSinceEpochReset.TotalSeconds:0.0}s)", gray);
+            DrawStatRow("Safe Mode", animLock.SafeModeActive ? animLock.LastSafeModeReason : "none", animLock.SafeModeActive ? yellow : green);
+            DrawStatRow("Pending", $"{animLock.PendingPredictionCount}", gray);
+            DrawStatRow("Expired", $"{animLock.ExpiredPredictionCount}", gray);
+            DrawStatRow("Stale Invalid", $"{animLock.StalePredictionsInvalidated}", gray);
+            DrawStatRow("Prediction", animLock.LastPredictionReason, white);
 
             ImGui.Spacing();
             ImGui.TextColored(yellow, "Last Action");
             ImGui.Separator();
 
             DrawStatRow("Action ID", $"{animLock.LastActionID}", white);
-            DrawStatRow("Correction", $"{F2MS(animLock.LastCorrection)} ms", white);
-            DrawStatRow("Variance Buffer", $"{F2MS(animLock.LastVarianceBuffer)} ms", white);
-            DrawStatRow("Adjusted Lock", $"{F2MS(animLock.LastAdjustedLock)} ms", green);
+            DrawStatRow("Correction", FormatMs(animLock.LastCorrection), white);
+            DrawStatRow("Variance Buffer", FormatMs(animLock.LastVarianceBuffer), white);
+            DrawStatRow("Adjusted Lock", FormatMs(animLock.LastAdjustedLock), green);
             DrawStatRow("Packets (50ms)", $"{animLock.PacketsSent}", gray);
             DrawStatRow("Action Packets", $"{animLock.ActionPacketsSent}", gray);
             DrawStatRow("Pending Saves", $"{animLock.PendingLearnedEntries}", gray);
             DrawStatRow("Conflict State", animLock.ConflictDetected ? "Dry Run" : "Normal", animLock.ConflictDetected ? yellow : green);
+
+            var decision = animLock.LastDecision;
+            if (decision != null)
+            {
+                ImGui.Spacing();
+                ImGui.TextColored(yellow, "Last Decision");
+                ImGui.Separator();
+                DrawStatRow("Formula", decision.HasFormula
+                    ? $"{FormatMs(decision.ExistingLockBeforeWrite)} + {FormatMs(decision.Correction)} + {FormatMs(decision.VarianceBuffer)} = {FormatMs(decision.FinalAppliedLock)}"
+                    : "n/a (decision was not applied)", decision.HasFormula ? white : gray);
+                DrawStatRow("Reason", decision.DecisionReason, white);
+                if (!string.IsNullOrEmpty(decision.RejectionReason))
+                    DrawStatRow("Rejected", decision.RejectionReason, yellow);
+                DrawStatRow("Replay Rows", $"{animLock.ReplayRecordCount}", gray);
+            }
+
+            var cast = global::Tsunippy.Modules.Modules.GetInstance<CastLockPrediction>();
+            if (cast != null)
+            {
+                ImGui.Spacing();
+                ImGui.TextColored(yellow, "Cast Prediction");
+                ImGui.Separator();
+                DrawStatRow("Predicted", FormatMs(cast.LastPredictedCastLock), white);
+                DrawStatRow("Actual", FormatMs(cast.LastActualCastLock), white);
+                DrawStatRow("Replay", "cast decision not replay-recorded", gray);
+                DrawStatRow("Pending", $"{cast.PendingPredictionCount}", gray);
+                DrawStatRow("Expired", $"{cast.ExpiredPredictionCount}", gray);
+                DrawStatRow("State", cast.LastPredictionReason, white);
+            }
 
             // Database info
             if (animLock.LastActionID != 0)
@@ -98,7 +143,7 @@ namespace Tsunippy.Modules
                     ImGui.Spacing();
                     ImGui.TextColored(yellow, "Lock Database");
                     ImGui.Separator();
-                    DrawStatRow("Mean Lock", $"{F2MS(entry.MeanLock)} ms", white);
+                    DrawStatRow("Mean Lock", FormatMs(entry.MeanLock), white);
                     DrawStatRow("Confidence", $"{entry.Confidence:P0} ({entry.SampleCount} samples)", white);
                 }
             }
@@ -146,6 +191,11 @@ namespace Tsunippy.Modules
             ImGui.SameLine(160 * ImGuiHelpers.GlobalScale);
             ImGui.TextColored(valueColor, value);
         }
+
+        private static string FormatMs(float seconds)
+            => float.IsFinite(seconds) && seconds >= 0
+                ? $"{F2MS(seconds)} ms"
+                : "n/a";
 
         public override void DrawConfig()
         {

@@ -13,6 +13,18 @@ namespace Tsunippy.Database
         PvP = 1,
     }
 
+    public enum LearnedEntryState : byte
+    {
+        // Learning: samples are being collected, but active prediction uses the safer fallback.
+        Learning = 0,
+        // Trusted: enough clean samples have been accepted for active prediction.
+        Trusted = 1,
+        // Shadow: recent outliers made this entry suspicious; keep learning, but do not predict from it.
+        Shadow = 2,
+        // Frozen: do not learn new samples. A frozen entry is only usable if it is already strict-enough.
+        Frozen = 3,
+    }
+
     /// <summary>
     /// A single entry in the lock database tracking the observed animation lock
     /// for a specific (actionID, context) pair.
@@ -35,12 +47,41 @@ namespace Tsunippy.Database
         /// <summary>Unix timestamp of the last accepted sample.</summary>
         public long LastObservedUnix { get; set; }
 
+        /// <summary>Learning/trust state used to avoid trusting fresh or suspicious entries too early.</summary>
+        public LearnedEntryState State { get; set; } = LearnedEntryState.Learning;
+
+        /// <summary>Frozen entries can still be used when trusted, but do not accept new samples.</summary>
+        public bool Frozen { get; set; }
+
         /// <summary>
         /// Confidence level (0..1) based on sample count.
         /// Reaches 1.0 at 10 samples. Used to determine whether to trust
         /// this entry or fall back to the default lock value.
         /// </summary>
         public float Confidence => Math.Min(SampleCount / 10f, 1f);
+
+        public bool CanLearn => !Frozen;
+
+        public bool IsTrusted => State == LearnedEntryState.Trusted;
+
+        public bool CanUseForPrediction(float minimumValue, float maximumValue, float minimumConfidence = 0.6f)
+        {
+            if (!float.IsFinite(MeanLock)
+                || MeanLock < minimumValue
+                || MeanLock > maximumValue
+                || Confidence < minimumConfidence
+                || OutlierStreak != 0)
+                return false;
+
+            return State switch
+            {
+                LearnedEntryState.Trusted => true,
+                LearnedEntryState.Frozen => true,
+                LearnedEntryState.Learning => false,
+                LearnedEntryState.Shadow => false,
+                _ => false,
+            };
+        }
     }
 
     /// <summary>
@@ -68,6 +109,20 @@ namespace Tsunippy.Database
         public Dictionary<string, LockEntry> Entries { get; set; } = new();
 
         private static string MakeKey(uint actionID, GameContext ctx) => $"{actionID}_{(byte)ctx}";
+        public static bool TryParseKey(string key, out uint actionID, out GameContext context)
+        {
+            actionID = 0;
+            context = GameContext.PvE;
+            var split = key?.Split('_');
+            if (split is not { Length: 2 })
+                return false;
+
+            if (!uint.TryParse(split[0], out actionID) || !byte.TryParse(split[1], out var contextByte))
+                return false;
+
+            context = (GameContext)contextByte;
+            return true;
+        }
 
         /// <summary>
         /// Get the known animation lock for an action in a given context.
@@ -87,8 +142,10 @@ namespace Tsunippy.Database
             if (!float.IsFinite(entry.MeanLock) || entry.MeanLock < MinimumLock || entry.MeanLock > MaximumLock)
                 return defaultLock;
 
-            // Require at least 30% confidence (3 samples) to use the learned value
-            return entry.Confidence >= 0.3f ? entry.MeanLock : defaultLock;
+            RefreshState(entry);
+
+            // Shadow/learning entries keep collecting data but use the safer game default.
+            return entry.CanUseForPrediction(MinimumLock, MaximumLock) ? entry.MeanLock : defaultLock;
         }
 
         /// <summary>
@@ -116,8 +173,15 @@ namespace Tsunippy.Database
                     MeanDeviation = 0.01f,
                     SampleCount = 1,
                     LastObservedUnix = now,
+                    State = LearnedEntryState.Learning,
                 };
                 return true;
+            }
+
+            if (!entry.CanLearn)
+            {
+                entry.State = LearnedEntryState.Frozen;
+                return false;
             }
 
             var delta = Math.Abs(entry.MeanLock - lockValue);
@@ -127,15 +191,17 @@ namespace Tsunippy.Database
                 if (delta > allowedDrift)
                 {
                     entry.OutlierStreak++;
+                    entry.State = LearnedEntryState.Shadow;
                     if (entry.OutlierStreak < ResetOutlierThreshold)
                         return false;
 
                     // Repeated outliers likely indicate a real shift after a patch or balance change.
                     entry.MeanLock = lockValue;
                     entry.MeanDeviation = 0.01f;
-                    entry.SampleCount = Math.Min(entry.SampleCount, 3);
+                    entry.SampleCount = Math.Min(entry.SampleCount, 2);
                     entry.OutlierStreak = 0;
                     entry.LastObservedUnix = now;
+                    entry.State = LearnedEntryState.Learning;
                     return true;
                 }
             }
@@ -148,6 +214,7 @@ namespace Tsunippy.Database
                 if (entry.SampleCount < 1000)
                     entry.SampleCount++;
                 entry.LastObservedUnix = now;
+                RefreshState(entry);
                 return false;
             }
 
@@ -157,6 +224,7 @@ namespace Tsunippy.Database
             entry.MeanLock += (lockValue - entry.MeanLock) / entry.SampleCount;
             entry.MeanDeviation += (delta - entry.MeanDeviation) / entry.SampleCount;
             entry.LastObservedUnix = now;
+            RefreshState(entry);
             return true;
         }
 
@@ -166,7 +234,11 @@ namespace Tsunippy.Database
         public bool HasConfidentEntry(uint actionID, GameContext context)
         {
             var key = MakeKey(actionID, context);
-            return Entries.TryGetValue(key, out var entry) && entry.Confidence >= 0.5f;
+            if (!Entries.TryGetValue(key, out var entry))
+                return false;
+
+            RefreshState(entry);
+            return entry.CanUseForPrediction(MinimumLock, MaximumLock);
         }
 
         /// <summary>
@@ -175,9 +247,46 @@ namespace Tsunippy.Database
         public LockEntry GetEntry(uint actionID, GameContext context)
         {
             var key = MakeKey(actionID, context);
-            return Entries.TryGetValue(key, out var entry) ? entry : null;
+            if (!Entries.TryGetValue(key, out var entry))
+                return null;
+
+            RefreshState(entry);
+            return entry;
+        }
+
+        public bool ResetEntry(uint actionID, GameContext context)
+            => Entries.Remove(MakeKey(actionID, context));
+
+        public bool SetFrozen(uint actionID, GameContext context, bool frozen)
+        {
+            if (!Entries.TryGetValue(MakeKey(actionID, context), out var entry))
+                return false;
+
+            entry.Frozen = frozen;
+            entry.State = frozen ? LearnedEntryState.Frozen : LearnedEntryState.Learning;
+            RefreshState(entry);
+            return true;
         }
 
         public void Reset() => Entries.Clear();
+
+        private static void RefreshState(LockEntry entry)
+        {
+            if (entry.Frozen)
+            {
+                entry.State = LearnedEntryState.Frozen;
+                return;
+            }
+
+            if (entry.OutlierStreak > 0)
+            {
+                entry.State = LearnedEntryState.Shadow;
+                return;
+            }
+
+            entry.State = entry.Confidence >= 0.6f
+                ? LearnedEntryState.Trusted
+                : LearnedEntryState.Learning;
+        }
     }
 }

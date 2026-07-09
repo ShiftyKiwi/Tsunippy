@@ -1,10 +1,12 @@
 using System;
 using System.Numerics;
 using Dalamud.Bindings.ImGui;
+using Dalamud.Game.ClientState.Conditions;
 using FFXIVClientStructs.FFXIV.Client.Game;
 using FFXIVClientStructs.FFXIV.Client.Game.Character;
 using FFXIVClientStructs.FFXIV.Client.Game.Object;
 using Tsunippy.Database;
+using Tsunippy.Runtime;
 using static Tsunippy.Tsunippy;
 
 namespace Tsunippy
@@ -52,15 +54,30 @@ namespace Tsunippy.Modules
         private ushort castSequence = 0;
         private uint castActionId = 0;
         private GameContext castContext = GameContext.PvE;
+        private PendingPrediction pendingPrediction;
+        private float recentFrameDelta = 1f / 60f;
+        private int expiredPredictionCount;
+        private string lastPredictionReason = "none";
+        private ushort lastOwnedSequence;
+        private uint lastOwnedActionId;
+        private long lastOwnedResponseUntilTick;
+        private const int ResponseHandoffMilliseconds = 500;
 
         // Diagnostics
         public float LastPredictedCastLock { get; private set; }
         public float LastActualCastLock { get; private set; }
+        public int PendingPredictionCount => pendingPrediction == null ? 0 : 1;
+        public int ExpiredPredictionCount => expiredPredictionCount;
+        public string LastPredictionReason => lastPredictionReason;
 
-        private void CastBegin(ulong objectID, nint packetData)
+        private void CastBegin(uint casterEntityId, nint packetData)
         {
+            if (casterEntityId != DalamudApi.ObjectTable.LocalPlayer?.EntityId)
+                return;
+
             isCasting = true;
             lockApplied = false;
+            pendingPrediction = null;
             unsafe
             {
                 castSequence = Game.actionManager->currentSequence;
@@ -69,8 +86,21 @@ namespace Tsunippy.Modules
             castContext = DalamudApi.ClientState.IsPvP ? GameContext.PvP : GameContext.PvE;
         }
 
+        public bool ShouldOwnCastResponse(ushort sequence, uint actionId)
+        {
+            if (Environment.TickCount64 <= lastOwnedResponseUntilTick
+                && ResponseMatches(lastOwnedSequence, lastOwnedActionId, sequence, actionId))
+                return true;
+
+            if (!IsEnabled || (!isCasting && !lockApplied && pendingPrediction == null))
+                return false;
+
+            return ResponseMatches(castSequence, castActionId, sequence, actionId);
+        }
+
         private void CastInterrupt(nint actionManager)
         {
+            lastPredictionReason = "interrupted";
             ResetRuntimeState();
         }
 
@@ -79,14 +109,47 @@ namespace Tsunippy.Modules
         /// </summary>
         private unsafe void Update()
         {
+            recentFrameDelta = Math.Clamp((float)DalamudApi.Framework.UpdateDelta.TotalSeconds, 0.001f, 0.050f);
+
+            if (pendingPrediction != null && pendingPrediction.ExpiresTick < Environment.TickCount64)
+            {
+                expiredPredictionCount++;
+                lastPredictionReason = "expired";
+                ResetRuntimeState();
+                return;
+            }
+
             if (!isCasting || lockApplied) return;
 
-            var am = Game.actionManager;
-            if (am->castActionId == 0) return;
+            if (DalamudApi.Condition[ConditionFlag.BetweenAreas] || DalamudApi.ObjectTable.LocalPlayer == null)
+            {
+                lastPredictionReason = "state reset";
+                ResetRuntimeState();
+                return;
+            }
 
-            // Check if cast is about to complete (within one frame of finishing)
+            var am = Game.actionManager;
+            if (am->castActionId == 0)
+            {
+                lastPredictionReason = "cast no longer active";
+                ResetRuntimeState();
+                return;
+            }
+
+            if (castActionId != 0 && am->castActionId != castActionId)
+            {
+                lastPredictionReason = "cast action changed";
+                ResetRuntimeState();
+                return;
+            }
+
+            // Treat "about to complete" as roughly two recent frames, with a 20ms
+            // minimum for low-FPS jitter and a tight clamp so high-FPS clients do
+            // not accidentally use the old 50ms pseudo-frame window.
             var remaining = am->castTime - am->elapsedCastTime;
-            if (remaining > 0.05f) return; // Not close enough yet
+            var completionWindow = Math.Clamp(MathF.Max(recentFrameDelta * 2f, 0.020f), 0.020f, 0.050f);
+            if (remaining > completionWindow || remaining < -recentFrameDelta)
+                return;
 
             // Pre-apply the caster tax lock
             var animLockModule = global::Tsunippy.Modules.Modules.GetInstance<AnimationLock>();
@@ -95,14 +158,30 @@ namespace Tsunippy.Modules
                 ? Config.CastTaxDb.GetTax(castActionId, castContext, Config.DefaultCasterTax)
                 : Config.DefaultCasterTax;
             var predictedLock = learnedTax + floor;
+            var existingLock = am->animationLock;
+            var epoch = animLockModule?.CurrentEpoch ?? 0;
 
             if (!animLockModule?.IsDryRunEnabled ?? true)
             {
-                am->animationLock = predictedLock;
+                am->animationLock = MathF.Max(existingLock, predictedLock);
             }
 
             lockApplied = true;
             LastPredictedCastLock = predictedLock;
+            pendingPrediction = new PendingPrediction
+            {
+                Sequence = castSequence,
+                ActionId = castActionId,
+                IsPvP = castContext == GameContext.PvP,
+                BaseLock = learnedTax,
+                PredictedLock = predictedLock,
+                OriginalLockAtPrediction = existingLock,
+                CreatedTick = Environment.TickCount64,
+                ExpiresTick = Environment.TickCount64 + 1_250,
+                ModelEpoch = epoch,
+                Source = "cast",
+            };
+            lastPredictionReason = "pending";
 
             DalamudApi.LogDebug($"Cast lock pre-applied: {F2MS(predictedLock)} ms (tax={F2MS(Config.DefaultCasterTax)}, floor={F2MS(floor)})");
         }
@@ -115,25 +194,83 @@ namespace Tsunippy.Modules
             ActionEffectHandler.TargetEffects* effects,
             GameObjectId* targetEntityIds, float oldLock, float newLock)
         {
-            if (!lockApplied) return;
-            if (NearlyEqual(oldLock, newLock) || (nint)casterPtr != DalamudApi.ObjectTable.LocalPlayer?.Address) return;
-            if (castSequence != 0 && header->SourceSequence != castSequence) return;
+            if (!isCasting && !lockApplied && pendingPrediction == null) return;
+            if ((nint)casterPtr != DalamudApi.ObjectTable.LocalPlayer?.Address) return;
+            if (NearlyEqual(oldLock, newLock))
+            {
+                MarkOwnedResponse(header->SourceSequence, actionId: castActionId != 0 ? castActionId : header->SpellId);
+                lastPredictionReason = "skipped no lock delta";
+                ResetRuntimeState();
+                return;
+            }
+
+            var actionId = castActionId != 0 ? castActionId : header->SpellId;
+            var animLockModule = global::Tsunippy.Modules.Modules.GetInstance<AnimationLock>();
+
+            if (pendingPrediction == null && lockApplied)
+            {
+                MarkOwnedResponse(header->SourceSequence, actionId);
+                lastPredictionReason = "missing pending cast";
+                ResetRuntimeState();
+                return;
+            }
+
+            if (pendingPrediction != null && pendingPrediction.ModelEpoch != (animLockModule?.CurrentEpoch ?? 0))
+            {
+                MarkOwnedResponse(header->SourceSequence, actionId);
+                lastPredictionReason = "stale epoch";
+                ResetRuntimeState();
+                return;
+            }
+
+            if (pendingPrediction != null && pendingPrediction.ExpiresTick < Environment.TickCount64)
+            {
+                MarkOwnedResponse(header->SourceSequence, actionId);
+                expiredPredictionCount++;
+                lastPredictionReason = "expired";
+                ResetRuntimeState();
+                return;
+            }
+
+            if (!ResponseMatches(castSequence, actionId, header->SourceSequence, header->SpellId))
+            {
+                lastPredictionReason = "sequence mismatch";
+                ResetRuntimeState();
+                return;
+            }
+
+            if (pendingPrediction != null && pendingPrediction.ActionId != 0 && actionId != pendingPrediction.ActionId)
+            {
+                lastPredictionReason = "action mismatch";
+                ResetRuntimeState();
+                return;
+            }
 
             // This is the server's response for our cast action
+            MarkOwnedResponse(header->SourceSequence, actionId);
             LastActualCastLock = newLock;
 
-            var animLockModule = global::Tsunippy.Modules.Modules.GetInstance<AnimationLock>();
             if (Config.LearnCastTax && !(animLockModule?.ConflictDetected ?? false))
             {
-                var actionId = castActionId != 0 ? castActionId : header->SpellId;
                 if (Config.CastTaxDb.RecordTax(actionId, castContext, newLock))
                     animLockModule?.NotifyLearnedDataChanged();
             }
 
+            var hadPreAppliedLock = lockApplied;
             isCasting = false;
             lockApplied = false;
             castSequence = 0;
             castActionId = 0;
+            pendingPrediction = null;
+            lastPredictionReason = "accepted";
+            if (!hadPreAppliedLock)
+            {
+                if (Config.EnableLogging)
+                    PrintLog($"Cast Lock Learned: action={actionId}, server={F2MS(newLock)} ms, no pre-apply");
+                lastPredictionReason = "accepted without pre-apply";
+                return;
+            }
+
             if (animLockModule?.IsDryRunEnabled ?? true) return;
 
             // The server's lock replaces ours. oldLock is what remains of our prediction.
@@ -207,8 +344,33 @@ namespace Tsunippy.Modules
             castSequence = 0;
             castActionId = 0;
             castContext = GameContext.PvE;
+            pendingPrediction = null;
             LastPredictedCastLock = 0f;
             LastActualCastLock = 0f;
+        }
+
+        private void MarkOwnedResponse(ushort sequence, uint actionId)
+        {
+            lastOwnedSequence = sequence;
+            lastOwnedActionId = actionId;
+            lastOwnedResponseUntilTick = Environment.TickCount64 + ResponseHandoffMilliseconds;
+        }
+
+        private static bool ResponseMatches(ushort expectedSequence, uint expectedActionId, ushort actualSequence, uint actualActionId)
+        {
+            var hasSequence = expectedSequence != 0 && actualSequence != 0;
+            var hasAction = expectedActionId != 0 && actualActionId != 0;
+
+            if (hasSequence && expectedSequence != actualSequence)
+                return false;
+
+            if (hasAction && expectedActionId != actualActionId)
+                return false;
+
+            // Some responses can be missing one identifier depending on action path.
+            // The 500ms handoff accepts a match on the other concrete identifier only;
+            // both-zero never matches, so unrelated non-cast responses are not hidden.
+            return hasSequence || hasAction;
         }
 
         private static bool NearlyEqual(float left, float right)

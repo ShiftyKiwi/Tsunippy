@@ -2,6 +2,7 @@ using System;
 using Dalamud.Game.Text;
 using Dalamud.Plugin;
 using Dalamud.Plugin.Services;
+using Tsunippy.Runtime;
 
 namespace Tsunippy
 {
@@ -13,6 +14,7 @@ namespace Tsunippy
         private bool frameworkSubscribed;
         private bool uiDrawSubscribed;
         private bool configUiSubscribed;
+        private bool mainUiSubscribed;
         private bool modulesInitialized;
         private bool gameInitialized;
         private bool dalamudInitialized;
@@ -37,6 +39,8 @@ namespace Tsunippy
                 uiDrawSubscribed = true;
                 DalamudApi.PluginInterface.UiBuilder.OpenConfigUi += ConfigUI.ToggleVisible;
                 configUiSubscribed = true;
+                DalamudApi.PluginInterface.UiBuilder.OpenMainUi += ConfigUI.ToggleVisible;
+                mainUiSubscribed = true;
 
                 Modules.Modules.Initialize();
                 modulesInitialized = true;
@@ -51,10 +55,13 @@ namespace Tsunippy
         }
 
         [Command("/tsunippy")]
-        [HelpMessage("/tsunippy [on|off|toggle|dry|diag|help] - Toggles the config window if no option is specified.")]
+        [HelpMessage("/tsunippy [on|off|toggle|dry|diag|stats|profile|export|reset|relearn|db|help] - Toggles the config window if no option is specified.")]
         private void OnTsunippy(string command, string argument)
         {
-            switch (argument)
+            var args = argument.Trim().Split(' ', StringSplitOptions.RemoveEmptyEntries);
+            var primary = args.Length > 0 ? args[0].ToLowerInvariant() : string.Empty;
+
+            switch (primary)
             {
                 case "on":
                 case "toggle" when !Config.EnableAnimLockComp:
@@ -85,18 +92,143 @@ namespace Tsunippy
                     PrintEcho($"Diagnostics overlay is now {(Config.EnableDiagnostics ? "enabled" : "disabled")}.");
                     break;
 
+                case "stats":
+                    Config.EnableEncounterStats = !Config.EnableEncounterStats;
+                    Config.Save();
+                    PrintEcho($"Encounter stats are now {(Config.EnableEncounterStats ? "enabled" : "disabled")}.");
+                    break;
+
+                case "profile":
+                    HandleProfileCommand(args);
+                    break;
+
+                case "export":
+                    HandleExportCommand(args);
+                    break;
+
+                case "reset":
+                    HandleResetCommand(args);
+                    break;
+
+                case "relearn":
+                    global::Tsunippy.Modules.Modules.GetInstance<global::Tsunippy.Modules.AnimationLock>()?.Relearn();
+                    Config.Save(checkModules: false);
+                    PrintEcho("Reset learned lock and cast-tax databases; timing model epoch advanced.");
+                    break;
+
+                case "db":
+                    Config.EnableDatabaseBrowser = true;
+                    ConfigUI.isVisible = true;
+                    Config.Save(checkModules: false);
+                    PrintEcho("Opened the learned database browser.");
+                    break;
+
+                case "help":
+                case "?":
+                    PrintHelp();
+                    break;
+
                 case "":
                     ConfigUI.ToggleVisible();
                     break;
 
                 default:
-                    PrintEcho("Usage: /tsunippy <option>" +
-                        "\n  on / off / toggle - Enable or disable animation lock compensation." +
-                        "\n  dry - Toggle dry run (calculations only, no lock overrides)." +
-                        "\n  diag - Toggle the real-time diagnostics overlay." +
-                        "\n  (no args) - Open the configuration window.");
+                    PrintHelp();
                     break;
             }
+        }
+
+        private static void HandleProfileCommand(string[] args)
+        {
+            if (args.Length < 2)
+            {
+                PrintEcho($"Current profile: {Config.Profile}. Use /tsunippy profile safe|balanced|aggressive|auto.");
+                return;
+            }
+
+            if (!Enum.TryParse<TsunippyProfile>(args[1], true, out var profile))
+            {
+                PrintEcho("Unknown profile. Use safe, balanced, aggressive, or auto.");
+                return;
+            }
+
+            Config.Profile = profile;
+            Config.Save(checkModules: false);
+            PrintEcho($"Profile set to {profile}.");
+        }
+
+        private static void HandleExportCommand(string[] args)
+        {
+            var format = args.Length >= 2 ? args[1].ToLowerInvariant() : "json";
+            if (format is not ("json" or "csv"))
+            {
+                PrintEcho("Usage: /tsunippy export [json|csv]");
+                return;
+            }
+
+            var animLock = global::Tsunippy.Modules.Modules.GetInstance<global::Tsunippy.Modules.AnimationLock>();
+            if (animLock == null)
+            {
+                PrintEcho("Animation lock module is not available; nothing was exported.");
+                return;
+            }
+
+            try
+            {
+                var path = animLock.ExportReplay(format);
+                PrintEcho($"Exported recent decisions to {path}");
+            }
+            catch (Exception exception)
+            {
+                DalamudApi.LogError("Failed exporting Tsunippy replay log.", exception);
+                PrintError($"Export failed: {exception.Message}");
+            }
+        }
+
+        private static void HandleResetCommand(string[] args)
+        {
+            if (args.Length < 2)
+            {
+                PrintEcho("Usage: /tsunippy reset floor|rtt");
+                return;
+            }
+
+            var animLock = global::Tsunippy.Modules.Modules.GetInstance<global::Tsunippy.Modules.AnimationLock>();
+            if (animLock == null)
+            {
+                PrintEcho("Animation lock module is not available.");
+                return;
+            }
+
+            switch (args[1].ToLowerInvariant())
+            {
+                case "floor":
+                    animLock.ResetFloor();
+                    PrintEcho("Reset dynamic floor and advanced the timing epoch.");
+                    break;
+                case "rtt":
+                    animLock.ResetRttModel();
+                    PrintEcho("Reset RTT estimators and advanced the timing epoch.");
+                    break;
+                default:
+                    PrintEcho("Usage: /tsunippy reset floor|rtt");
+                    break;
+            }
+        }
+
+        private static void PrintHelp()
+        {
+            PrintEcho("Commands:" +
+                "\n  /tsunippy - Open the configuration window." +
+                "\n  /tsunippy on|off|toggle - Enable or disable compensation." +
+                "\n  /tsunippy dry - Toggle dry run." +
+                "\n  /tsunippy diag - Toggle diagnostics overlay." +
+                "\n  /tsunippy stats - Toggle encounter stats." +
+                "\n  /tsunippy profile safe|balanced|aggressive|auto - Set local tuning profile." +
+                "\n  /tsunippy export [json|csv] - Export recent local decision log." +
+                "\n  /tsunippy reset floor|rtt - Reset local timing state." +
+                "\n  /tsunippy relearn - Reset learned lock and cast-tax data." +
+                "\n  /tsunippy db - Open learned database browser.");
         }
 
         public static void PrintEcho(string message) => DalamudApi.ChatGui.Print($"[Tsunippy] {message}");
@@ -162,6 +294,12 @@ namespace Tsunippy
             {
                 DalamudApi.PluginInterface.UiBuilder.OpenConfigUi -= ConfigUI.ToggleVisible;
                 configUiSubscribed = false;
+            }
+
+            if (mainUiSubscribed)
+            {
+                DalamudApi.PluginInterface.UiBuilder.OpenMainUi -= ConfigUI.ToggleVisible;
+                mainUiSubscribed = false;
             }
 
             if (modulesInitialized)

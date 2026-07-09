@@ -1,5 +1,5 @@
 using System;
-using System.Collections.Generic;
+using System.IO;
 using System.Numerics;
 using System.Text;
 using Dalamud.Bindings.ImGui;
@@ -9,6 +9,7 @@ using FFXIVClientStructs.FFXIV.Client.Game.Character;
 using FFXIVClientStructs.FFXIV.Client.Game.Object;
 using Tsunippy.Database;
 using Tsunippy.RTT;
+using Tsunippy.Runtime;
 using static Tsunippy.Tsunippy;
 
 namespace Tsunippy
@@ -53,16 +54,36 @@ namespace Tsunippy.Modules
         public override int DrawOrder => 1;
 
         private readonly JacobsonKarels rttEstimator = new();
+        private readonly DualRttEstimator dualRttEstimator = new();
         private readonly DynamicFloor dynamicFloor;
         private readonly PacketTracker packetTracker = new();
+        private readonly ModelEpoch modelEpoch = new();
+        private readonly PredictionTracker predictions = new();
+        private readonly RecentIssuedActionTracker recentIssuedActions = new();
+        private readonly ReplayLog replayLog;
 
         private bool isCasting;
         private bool enableAnticheat;
         private bool saveLearnedData;
         private bool saveRuntimeStats;
+        private bool wasBetweenAreas;
+        private bool wasPlayerPresent;
+        private bool safeModeActive;
         private float outOfCombatIdleTimer;
         private int pendingLearnedEntries;
-        private readonly Dictionary<ushort, float> appliedAnimationLocks = new();
+        private int predictionMismatchStreak;
+        private int observedOutlierStreak;
+        private int pathShiftStreak;
+        private long lastActionTick;
+        private long lastPredictedTick;
+        private ushort lastPredictedSequence;
+        private uint lastPredictedActionId;
+        private float lastPredictedLock;
+        private ulong lastPredictedEpoch;
+        private uint lastTerritoryType = uint.MaxValue;
+        private ProfileSettings profileSettings;
+        private string lastPredictionReason = "none";
+        private string lastSafeModeReason = "startup";
 
         private const float LearnedSaveIdleDelay = 15f;
         private const float LearnedBatchSaveIdleDelay = 5f;
@@ -84,18 +105,42 @@ namespace Tsunippy.Modules
         public int PendingLearnedEntries => pendingLearnedEntries;
         public bool ConflictDetected => enableAnticheat;
         public bool IsDryRunEnabled => enableAnticheat || Config.EnableDryRun;
+        public ulong CurrentEpoch => modelEpoch.Current;
+        public string LastEpochResetReason => modelEpoch.LastResetReason;
+        public TimeSpan TimeSinceEpochReset => modelEpoch.TimeSinceReset;
+        public int StalePredictionsInvalidated => modelEpoch.StalePredictionsInvalidated + predictions.StaleEpochCount;
+        public int PendingPredictionCount => predictions.Count;
+        public int ExpiredPredictionCount => predictions.ExpiredCount;
+        public string LastPredictionReason => lastPredictionReason;
+        public bool SafeModeActive => safeModeActive;
+        public string LastSafeModeReason => lastSafeModeReason;
+        public string EstimatorMaturity => rttEstimator.EstimatorMaturity;
+        public float VarianceTrustFactor => rttEstimator.VarianceTrustFactor;
+        public bool IsRttWarm => rttEstimator.IsWarm;
+        public ConnectionState ConnectionClassification => dualRttEstimator.Classification;
+        public TsunippyProfile EffectiveProfile => profileSettings.EffectiveProfile;
+        public FloorMode CurrentFloorMode => dynamicFloor.Mode;
+        public float RawMinRTT => dynamicFloor.RawMinRTT;
+        public string LastFloorAdjustmentReason => dynamicFloor.LastAdjustmentReason;
+        public DecisionTrace LastDecision => replayLog.Last;
+        public int ReplayRecordCount => replayLog.Count;
 
         public AnimationLock()
         {
             dynamicFloor = new DynamicFloor(Config.DynamicFloorWindow);
+            replayLog = new ReplayLog(Config.ReplayLogCapacity);
+            profileSettings = ProfileSettings.From(Config.Profile, ConnectionState.WarmingUp);
             ResetRuntimeState();
         }
 
-        private float GetPredictedLock(uint actionID)
+        private float GetBaseLock(uint actionID, GameContext context)
+            => Config.LockDb.GetLock(actionID, context, Game.DefaultClientAnimationLock);
+
+        private float GetPredictedLock(uint actionID, GameContext context, out float baseLock)
         {
-            var context = GetCurrentContext();
-            var baseLock = Config.LockDb.GetLock(actionID, context, Game.DefaultClientAnimationLock);
-            return baseLock + dynamicFloor.Floor;
+            RefreshRuntimeSettings();
+            baseLock = GetBaseLock(actionID, context);
+            return baseLock + dynamicFloor.Floor * profileSettings.PredictionAggressiveness;
         }
 
         private static GameContext GetCurrentContext()
@@ -112,21 +157,54 @@ namespace Tsunippy.Modules
 
         private unsafe void ApplyPredictedLock(ActionType actionType, uint actionID)
         {
-            if (!NearlyEqual(Game.actionManager->animationLock, Game.DefaultClientAnimationLock))
+            var existingLock = Game.actionManager->animationLock;
+            if (!NearlyEqual(existingLock, Game.DefaultClientAnimationLock))
                 return;
 
-            var id = ActionManager.GetSpellIdForAction(actionType, actionID);
-            var predictedLock = GetPredictedLock(id);
+            var now = Environment.TickCount64;
+            // Fifteen seconds is long enough to avoid ordinary GCD downtime but short
+            // enough to avoid carrying timing assumptions across AFK, wipes, or zoning gaps.
+            if (lastActionTick != 0 && now - lastActionTick > 15_000)
+                AdvanceEpoch("long idle gap before action", resetRttModel: true);
 
-            appliedAnimationLocks[Game.actionManager->currentSequence] = predictedLock;
+            lastActionTick = now;
+            var id = ActionManager.GetSpellIdForAction(actionType, actionID);
+            var context = GetCurrentContext();
+            var predictedLock = GetPredictedLock(id, context, out var baseLock);
+            var sequence = Game.actionManager->currentSequence;
+
+            predictions.Add(new PendingPrediction
+            {
+                Sequence = sequence,
+                ActionId = id,
+                IsPvP = context == GameContext.PvP,
+                BaseLock = baseLock,
+                PredictedLock = predictedLock,
+                OriginalLockAtPrediction = existingLock,
+                CreatedTick = now,
+                ExpiresTick = now + (long)profileSettings.PredictionTtlMilliseconds,
+                ModelEpoch = modelEpoch.Current,
+                Source = actionType.ToString(),
+            });
+
+            lastPredictedTick = now;
+            lastPredictedSequence = sequence;
+            lastPredictedActionId = id;
+            lastPredictedLock = predictedLock;
+            lastPredictedEpoch = modelEpoch.Current;
+            RecordDecision(sequence, id, context, baseLock, existingLock, predictedLock, predictedLock, existingLock,
+                0f, 0f, "pre-applied pending lock", string.Empty, source: actionType.ToString(),
+                ownership: DecisionOwnership.PreAppliedPendingLock);
 
             if (!IsDryRunEnabled)
             {
-                Game.actionManager->animationLock = predictedLock;
+                Game.actionManager->animationLock = MathF.Max(existingLock, predictedLock);
             }
 
             packetTracker.MarkActionIssued();
-            DalamudApi.LogDebug($"Applying {F2MS(predictedLock)} ms animation lock for {actionType} {actionID} ({id}), floor={F2MS(dynamicFloor.Floor)} ms");
+            lastPredictionReason = $"pending {id} seq {sequence}";
+            if (Config.EnableLogging)
+                DalamudApi.LogDebug($"Applying {F2MS(predictedLock)} ms animation lock for {actionType} {actionID} ({id}), floor={F2MS(dynamicFloor.Floor)} ms, epoch={modelEpoch.Current}");
         }
 
         private unsafe void UseAction(ActionManager* actionManager, ActionType actionType, uint actionID,
@@ -136,6 +214,7 @@ namespace Tsunippy.Modules
             if (!ret)
                 return;
 
+            RecordIssuedLocalAction(actionType, actionID, "UseAction");
             ApplyPredictedLock(actionType, actionID);
         }
 
@@ -145,11 +224,17 @@ namespace Tsunippy.Modules
             if (ret == 0)
                 return;
 
+            RecordIssuedLocalAction((ActionType)actionType, actionID, "UseActionLocation");
             ApplyPredictedLock((ActionType)actionType, actionID);
         }
 
-        private void CastBegin(ulong objectID, nint packetData)
-            => isCasting = true;
+        private void CastBegin(uint casterEntityId, nint packetData)
+        {
+            if (casterEntityId != DalamudApi.ObjectTable.LocalPlayer?.EntityId)
+                return;
+
+            isCasting = !IsCastPredictionOwnerActive();
+        }
 
         private void CastInterrupt(nint actionManager)
             => isCasting = false;
@@ -164,7 +249,18 @@ namespace Tsunippy.Modules
                 if (NearlyEqual(oldLock, newLock) || (nint)casterPtr != DalamudApi.ObjectTable.LocalPlayer?.Address)
                     return;
 
-                if (isCasting)
+                var castPrediction = global::Tsunippy.Modules.Modules.GetInstance<CastLockPrediction>();
+                if (castPrediction?.ShouldOwnCastResponse(header->SourceSequence, header->SpellId) == true)
+                {
+                    isCasting = false;
+                    lastPredictionReason = "cast response owned by cast predictor";
+                    RecordDecision(header->SourceSequence, header->SpellId, GetCurrentContext(), 0f, newLock, 0f,
+                        newLock, oldLock, 0f, 0f, "cast prediction owner", string.Empty, source: "cast",
+                        ownership: DecisionOwnership.CastPrediction);
+                    return;
+                }
+
+                if (isCasting && !IsCastPredictionOwnerActive())
                 {
                     isCasting = false;
                     newLock += oldLock;
@@ -175,11 +271,17 @@ namespace Tsunippy.Modules
                     if (Config.EnableLogging)
                         PrintLog($"Cast Lock: {F2MS(newLock)} ms (+{F2MS(oldLock)})");
 
+                    lastPredictionReason = "legacy cast fallback";
+                    RecordDecision(header->SourceSequence, header->SpellId, GetCurrentContext(), 0f, newLock, 0f,
+                        newLock, oldLock, 0f, 0f, "legacy cast receive", string.Empty, source: "legacy-receive",
+                        ownership: DecisionOwnership.LegacyReceive);
                     return;
                 }
 
                 if (!NearlyEqual(newLock, header->AnimationLock))
                 {
+                    observedOutlierStreak++;
+                    MaybeResetForRepeatedOutliers("animation lock offset mismatch");
                     PrintError("Mismatched animation lock offset! This can be caused by another plugin affecting the animation lock.");
                     return;
                 }
@@ -193,14 +295,26 @@ namespace Tsunippy.Modules
 
                 var sequence = header->SourceSequence;
                 var actionID = header->SpellId;
-                var hadPrediction = appliedAnimationLocks.TryGetValue(sequence, out var appliedLock);
+                var now = Environment.TickCount64;
+                var hadPrediction = predictions.TryConsume(sequence, actionID, modelEpoch.Current, now, out var prediction);
                 LastActionID = actionID;
 
-                appliedAnimationLocks.Remove(sequence);
-
                 var context = GetCurrentContext();
+                var lockEntryBefore = Config.LockDb.GetEntry(actionID, context);
+                var outliersBefore = lockEntryBefore?.OutlierStreak ?? 0;
                 if (!enableAnticheat && Config.LearnAnimationLocks && Config.LockDb.RecordLock(actionID, context, newLock))
                     MarkLearnedDataDirty();
+
+                var lockEntry = Config.LockDb.GetEntry(actionID, context);
+                if ((lockEntry?.OutlierStreak ?? 0) > outliersBefore)
+                {
+                    observedOutlierStreak++;
+                    MaybeResetForRepeatedOutliers("learned lock outliers");
+                }
+                else
+                {
+                    observedOutlierStreak = Math.Max(0, observedOutlierStreak - 1);
+                }
 
                 if (!hadPrediction)
                 {
@@ -208,6 +322,11 @@ namespace Tsunippy.Modules
                     LastCorrection = 0;
                     LastVarianceBuffer = 0;
                     LastAdjustedLock = newLock;
+                    lastPredictionReason = predictions.LastRejectionReason;
+                    RegisterPredictionMismatch(predictions.LastRejectionReason);
+                    RecordDecision(sequence, actionID, context, 0f, newLock, 0f, newLock, oldLock, 0f, 0f,
+                        "no compensation", predictions.LastRejectionReason, source: "receive",
+                        ownership: DecisionOwnership.RejectedNoCompensation);
 
                     if (Config.EnableLogging)
                         PrintLog($"Action: {actionID} ({F2MS(newLock)} ms) || No correlated prediction, skipped RTT correction");
@@ -215,12 +334,26 @@ namespace Tsunippy.Modules
                     return;
                 }
 
+                predictionMismatchStreak = 0;
                 var currentFloor = dynamicFloor.Floor;
-                var lastRecordedLock = appliedLock - currentFloor;
+                var lastRecordedLock = prediction.BaseLock;
 
                 var correction = newLock - lastRecordedLock;
-                var rtt = appliedLock - oldLock;
+                var rtt = prediction.PredictedLock - oldLock;
                 LastRTT = rtt;
+
+                if (rtt <= 0 || !float.IsFinite(rtt) || rtt > 5f)
+                {
+                    LastCorrection = 0;
+                    LastVarianceBuffer = 0;
+                    LastAdjustedLock = newLock;
+                    lastPredictionReason = "invalid RTT sample";
+                    RegisterPredictionMismatch(lastPredictionReason);
+                    RecordDecision(sequence, actionID, context, prediction.BaseLock, newLock, prediction.PredictedLock,
+                        newLock, oldLock, rtt, 0f, "rejected invalid RTT", lastPredictionReason, source: prediction.Source,
+                        ownership: DecisionOwnership.RejectedNoCompensation);
+                    return;
+                }
 
                 dynamicFloor.AddSample(rtt);
                 if (rtt <= currentFloor)
@@ -231,16 +364,28 @@ namespace Tsunippy.Modules
                     LastCorrection = 0;
                     LastVarianceBuffer = 0;
                     LastAdjustedLock = newLock;
+                    lastPredictionReason = "RTT below floor";
+                    RecordDecision(sequence, actionID, context, prediction.BaseLock, newLock, prediction.PredictedLock,
+                        newLock, oldLock, rtt, 0f, "floor guard", lastPredictionReason, source: prediction.Source,
+                        ownership: DecisionOwnership.RejectedNoCompensation);
                     return;
                 }
 
-                var weight = packetTracker.GetRTTWeight();
+                var weight = Math.Clamp(packetTracker.GetRTTWeight() * profileSettings.PacketSpikeStrictness, 0.05f, 1f);
                 rttEstimator.AddSample(rtt, weight);
+                dualRttEstimator.AddSample(rtt, weight);
 
-                rttEstimator.Alpha = Config.JKAlpha;
-                rttEstimator.Beta = Config.JKBeta;
-                rttEstimator.K = Config.JKK;
-                dynamicFloor.ScalingFactor = Config.DynamicFloorScaling;
+                RefreshRuntimeSettings();
+                if (MaybeResetForPathShift())
+                {
+                    LastCorrection = 0;
+                    LastVarianceBuffer = 0;
+                    LastAdjustedLock = newLock;
+                    RecordDecision(sequence, actionID, context, prediction.BaseLock, newLock, prediction.PredictedLock,
+                        newLock, oldLock, rtt, weight, "epoch reset", "sustained RTT path shift", source: prediction.Source,
+                        ownership: DecisionOwnership.RejectedNoCompensation);
+                    return;
+                }
 
                 var varianceBuffer = rttEstimator.VarianceBuffer;
                 LastVarianceBuffer = varianceBuffer;
@@ -248,6 +393,7 @@ namespace Tsunippy.Modules
 
                 var adjustedAnimationLock = Math.Max(oldLock + correction + varianceBuffer, 0);
                 LastAdjustedLock = (float)adjustedAnimationLock;
+                lastPredictionReason = "accepted";
 
                 if (!IsDryRunEnabled && float.IsFinite((float)adjustedAnimationLock) && adjustedAnimationLock < 10)
                 {
@@ -257,6 +403,11 @@ namespace Tsunippy.Modules
                     Config.TotalActionsReduced++;
                     MarkRuntimeStatsDirty();
                 }
+
+                RecordDecision(sequence, actionID, context, prediction.BaseLock, newLock, prediction.PredictedLock,
+                    (float)adjustedAnimationLock, oldLock, rtt, weight,
+                    safeModeActive ? $"safe mode: {lastSafeModeReason}" : "accepted", string.Empty, hasFormula: true,
+                    source: prediction.Source, ownership: DecisionOwnership.AcceptedServerReconciliation);
 
                 if (!Config.EnableLogging)
                     return;
@@ -293,6 +444,26 @@ namespace Tsunippy.Modules
         {
             var deltaSeconds = (float)DalamudApi.Framework.UpdateDelta.TotalSeconds;
             var inCombat = DalamudApi.Condition[ConditionFlag.InCombat];
+            var betweenAreas = DalamudApi.Condition[ConditionFlag.BetweenAreas];
+            var playerPresent = DalamudApi.ObjectTable.LocalPlayer != null;
+            var territoryType = (uint)DalamudApi.ClientState.TerritoryType;
+
+            if (lastTerritoryType != uint.MaxValue && territoryType != lastTerritoryType)
+                AdvanceEpoch("territory changed", resetRttModel: true);
+            lastTerritoryType = territoryType;
+
+            if (betweenAreas && !wasBetweenAreas)
+                AdvanceEpoch("zoning", resetRttModel: true);
+            wasBetweenAreas = betweenAreas;
+
+            if (wasPlayerPresent && !playerPresent)
+                AdvanceEpoch("local player unavailable", resetRttModel: true);
+            wasPlayerPresent = playerPresent;
+
+            RefreshRuntimeSettings();
+            var removed = predictions.Cleanup(Environment.TickCount64, modelEpoch.Current);
+            modelEpoch.AddStaleInvalidations(removed);
+
             outOfCombatIdleTimer = inCombat ? 0f : outOfCombatIdleTimer + deltaSeconds;
 
             if ((saveLearnedData || saveRuntimeStats) && ShouldFlushConfigSave(inCombat))
@@ -304,9 +475,306 @@ namespace Tsunippy.Modules
             packetTracker.Update(deltaSeconds);
         }
 
+        public void ResetFloor()
+        {
+            dynamicFloor.Reset();
+            AdvanceEpoch("manual floor reset", resetRttModel: false);
+        }
+
+        public void ResetRttModel()
+        {
+            AdvanceEpoch("manual RTT reset", resetRttModel: true);
+        }
+
+        public void Relearn()
+        {
+            Config.LockDb.Reset();
+            Config.CastTaxDb.Reset();
+            AdvanceEpoch("manual relearn", resetRttModel: true);
+            MarkLearnedDataDirty();
+        }
+
+        public string ExportReplay(string format)
+        {
+            var directory = Path.Combine(DalamudApi.PluginInterface.ConfigDirectory.FullName, "exports");
+            return string.Equals(format, "csv", StringComparison.OrdinalIgnoreCase)
+                ? replayLog.ExportCsv(directory)
+                : replayLog.ExportJson(directory);
+        }
+
+        public bool TryGetRecentActionForSequence(ushort sequence, TimeSpan maxAge, out uint actionId)
+            => TryGetRecentAcceptedActionForSequence(sequence, maxAge, out actionId);
+
+        public bool TryGetRecentAcceptedActionForSequence(ushort sequence, TimeSpan maxAge, out uint actionId)
+        {
+            if (replayLog.TryFindRecentBySequence(sequence, maxAge,
+                    trace => trace.Ownership == DecisionOwnership.AcceptedServerReconciliation
+                             && trace.Epoch == modelEpoch.Current, out var trace)
+                && trace.ActionId != 0
+                && IsActionPredictionSource(trace.Source))
+            {
+                actionId = trace.ActionId;
+                return true;
+            }
+
+            actionId = 0;
+            return false;
+        }
+
+        public bool TryGetRecentIssuedActionForSequence(ushort sequence, TimeSpan maxAge, out RecentIssuedAction action)
+            => recentIssuedActions.TryFindBySequence(sequence, maxAge, out action);
+
+        public bool TryGetRecentIssuedActionNearNow(TimeSpan maxAge, out RecentIssuedAction action)
+            => recentIssuedActions.TryFindNearNow(maxAge, out action);
+
+        public bool TryGetRecentPredictionState(ushort sequence, TimeSpan maxAge, out RecentPredictionState state)
+        {
+            var now = Environment.TickCount64;
+            if (predictions.TryGetPending(sequence, modelEpoch.Current, now, out var pending))
+            {
+                state = new RecentPredictionState
+                {
+                    Sequence = pending.Sequence,
+                    ActionId = pending.ActionId,
+                    PredictedLock = pending.PredictedLock,
+                    CreatedTick = pending.CreatedTick,
+                    ModelEpoch = pending.ModelEpoch,
+                    IsPendingForSequence = true,
+                    State = "pending",
+                    Ownership = DecisionOwnership.PreAppliedPendingLock,
+                };
+                return state.AgeMilliseconds(now) <= maxAge.TotalMilliseconds;
+            }
+
+            if (lastPredictedTick != 0
+                && lastPredictedSequence == sequence
+                && lastPredictedEpoch == modelEpoch.Current
+                && now - lastPredictedTick <= maxAge.TotalMilliseconds)
+            {
+                state = new RecentPredictionState
+                {
+                    Sequence = lastPredictedSequence,
+                    ActionId = lastPredictedActionId,
+                    PredictedLock = lastPredictedLock,
+                    CreatedTick = lastPredictedTick,
+                    ModelEpoch = lastPredictedEpoch,
+                    IsPendingForSequence = false,
+                    State = "recent",
+                    Ownership = DecisionOwnership.PreAppliedPendingLock,
+                };
+                return true;
+            }
+
+            state = null;
+            return false;
+        }
+
+        public bool TryGetRecentPluginOwnedState(ushort sequence, TimeSpan maxAge, out RecentPredictionState state)
+        {
+            if (TryGetRecentPredictionState(sequence, maxAge, out state))
+                return true;
+
+            if (replayLog.TryFindRecentBySequence(sequence, maxAge, IsPluginOwnedTrace, out var trace))
+            {
+                var now = DateTimeOffset.UtcNow;
+                state = new RecentPredictionState
+                {
+                    Sequence = trace.Sequence,
+                    ActionId = trace.ActionId,
+                    PredictedLock = trace.PredictedLock > 0 ? trace.PredictedLock : trace.FinalAppliedLock,
+                    CreatedTick = Environment.TickCount64 - Math.Max(0, (long)(now - trace.Timestamp).TotalMilliseconds),
+                    ModelEpoch = trace.Epoch,
+                    IsPendingForSequence = false,
+                    State = TraceOwnershipState(trace.Ownership),
+                    Ownership = trace.Ownership,
+                };
+                return true;
+            }
+
+            state = null;
+            return false;
+        }
+
+        public bool HasRecentDecisionForSequence(ushort sequence, TimeSpan maxAge)
+            => replayLog.TryFindRecentBySequence(sequence, maxAge,
+                trace => trace.Ownership != DecisionOwnership.PreAppliedPendingLock, out _);
+
+        private static bool IsPluginOwnedTrace(DecisionTrace trace)
+            => trace.Ownership is DecisionOwnership.PreAppliedPendingLock
+                or DecisionOwnership.AcceptedServerReconciliation
+                or DecisionOwnership.RejectedNoCompensation
+                or DecisionOwnership.CastPrediction
+                or DecisionOwnership.LegacyReceive;
+
+        private static string TraceOwnershipState(DecisionOwnership ownership)
+            => ownership switch
+            {
+                DecisionOwnership.PreAppliedPendingLock => "pending",
+                DecisionOwnership.AcceptedServerReconciliation => "reconciled",
+                DecisionOwnership.RejectedNoCompensation => "rejected",
+                DecisionOwnership.CastPrediction => "cast",
+                DecisionOwnership.LegacyReceive => "legacy",
+                _ => "unknown",
+            };
+
+        private static bool IsActionPredictionSource(string source)
+            => !string.IsNullOrWhiteSpace(source)
+               && !string.Equals(source, "receive", StringComparison.OrdinalIgnoreCase)
+               && !string.Equals(source, "cast", StringComparison.OrdinalIgnoreCase);
+
+        private unsafe void RecordIssuedLocalAction(ActionType actionType, uint actionID, string source)
+        {
+            var resolvedActionId = ActionManager.GetSpellIdForAction(actionType, actionID);
+            if (resolvedActionId == 0)
+                return;
+
+            recentIssuedActions.Record(new RecentIssuedAction
+            {
+                Sequence = Game.actionManager != null ? Game.actionManager->currentSequence : (ushort)0,
+                ActionId = resolvedActionId,
+                OriginalActionId = actionID,
+                Source = source,
+                ActionType = actionType,
+                CreatedTick = Environment.TickCount64,
+                ModelEpoch = modelEpoch.Current,
+            });
+        }
+
+        private void RefreshRuntimeSettings()
+        {
+            var settings = ProfileSettings.From(Config.Profile, dualRttEstimator.Classification);
+            var safeReason = GetSafeModeReason();
+            safeModeActive = safeReason.Length > 0;
+            lastSafeModeReason = safeModeActive ? safeReason : "none";
+
+            profileSettings = safeModeActive && settings.EffectiveProfile != TsunippyProfile.Safe
+                ? ProfileSettings.From(TsunippyProfile.Safe, dualRttEstimator.Classification)
+                : settings;
+
+            rttEstimator.Alpha = Config.JKAlpha;
+            rttEstimator.Beta = Config.JKBeta;
+            rttEstimator.K = Config.JKK * profileSettings.VarianceMultiplier;
+            dynamicFloor.ScalingFactor = Config.DynamicFloorScaling;
+            dynamicFloor.Mode = profileSettings.FloorMode;
+            dynamicFloor.ConnectionState = dualRttEstimator.Classification;
+        }
+
+        private string GetSafeModeReason()
+        {
+            if (!rttEstimator.IsWarm)
+                return "RTT estimator warming up";
+
+            if (modelEpoch.TimeSinceReset.TotalSeconds < 2)
+                return "epoch recently reset";
+
+            if (dualRttEstimator.Classification is ConnectionState.Bursty or ConnectionState.PathShifted)
+                return $"connection {dualRttEstimator.Classification}";
+
+            if (predictionMismatchStreak >= 2)
+                return "prediction mismatch streak";
+
+            if (observedOutlierStreak >= 2)
+                return "observed lock outlier streak";
+
+            return string.Empty;
+        }
+
+        private void AdvanceEpoch(string reason, bool resetRttModel)
+        {
+            modelEpoch.Reset(reason);
+            modelEpoch.AddStaleInvalidations(predictions.RemoveEpochsBefore(modelEpoch.Current));
+            predictionMismatchStreak = 0;
+            observedOutlierStreak = 0;
+            pathShiftStreak = 0;
+            lastPredictionReason = $"epoch reset: {reason}";
+
+            if (resetRttModel)
+            {
+                rttEstimator.Reset();
+                dualRttEstimator.Reset();
+                dynamicFloor.Reset();
+                packetTracker.Reset();
+            }
+
+            RefreshRuntimeSettings();
+        }
+
+        private void RegisterPredictionMismatch(string reason)
+        {
+            if (string.Equals(reason, "no pending prediction", StringComparison.OrdinalIgnoreCase))
+                return;
+
+            predictionMismatchStreak++;
+            if (predictionMismatchStreak >= 3)
+                AdvanceEpoch($"repeated prediction mismatch: {reason}", resetRttModel: true);
+        }
+
+        private void MaybeResetForRepeatedOutliers(string reason)
+        {
+            if (observedOutlierStreak >= 3)
+                AdvanceEpoch($"repeated observed lock outliers: {reason}", resetRttModel: true);
+        }
+
+        private bool MaybeResetForPathShift()
+        {
+            if (dualRttEstimator.Classification == ConnectionState.PathShifted)
+                pathShiftStreak++;
+            else
+                pathShiftStreak = Math.Max(0, pathShiftStreak - 1);
+
+            if (pathShiftStreak < 3 || modelEpoch.TimeSinceReset.TotalSeconds < 5)
+                return false;
+
+            AdvanceEpoch("sustained RTT path shift", resetRttModel: true);
+            return true;
+        }
+
+        private static bool IsCastPredictionOwnerActive()
+            => global::Tsunippy.Modules.Modules.GetInstance<CastLockPrediction>()?.IsEnabled == true;
+
+        private void RecordDecision(ushort sequence, uint actionID, GameContext context, float baseLock,
+            float observedLock, float predictedLock, float finalAppliedLock, float existingLockBeforeWrite,
+            float rttSample, float packetWeight, string decisionReason, string rejectionReason, bool hasFormula = false,
+            string source = "", DecisionOwnership ownership = DecisionOwnership.Unknown)
+        {
+            var lockConfidence = Config.LockDb.GetEntry(actionID, context)?.Confidence ?? 0f;
+            var castConfidence = Config.CastTaxDb.GetEntry(actionID, context)?.Confidence ?? 0f;
+            var correction = baseLock > 0 ? observedLock - baseLock : 0f;
+            replayLog.Add(new DecisionTrace
+            {
+                Epoch = modelEpoch.Current,
+                Sequence = sequence,
+                ActionId = actionID,
+                Source = source,
+                Ownership = ownership,
+                IsPvP = context == GameContext.PvP,
+                BaseLock = baseLock,
+                ObservedLock = observedLock,
+                PredictedLock = predictedLock,
+                FinalAppliedLock = finalAppliedLock,
+                ExistingLockBeforeWrite = existingLockBeforeWrite,
+                Correction = correction,
+                RttSample = rttSample,
+                SmoothedRtt = rttEstimator.SmoothedRTT,
+                RttVariance = rttEstimator.RTTVariance,
+                DynamicFloor = dynamicFloor.Floor,
+                VarianceBuffer = rttEstimator.VarianceBuffer,
+                PacketWeight = packetWeight,
+                HasFormula = hasFormula,
+                Profile = $"{Config.Profile}/{profileSettings.EffectiveProfile}",
+                ConnectionState = dualRttEstimator.Classification.ToString(),
+                EstimatorMaturity = rttEstimator.EstimatorMaturity,
+                LockDbConfidence = lockConfidence,
+                CastTaxConfidence = castConfidence,
+                DecisionReason = decisionReason,
+                RejectionReason = rejectionReason,
+            });
+        }
+
         public override unsafe void Enable()
         {
             ResetRuntimeState();
+            AdvanceEpoch("module enabled", resetRttModel: true);
             Game.OnUseAction += UseAction;
             Game.OnUseActionLocation += UseActionLocation;
             Game.OnCastBegin += CastBegin;
@@ -325,6 +793,7 @@ namespace Tsunippy.Modules
             Game.OnReceiveActionEffect -= ReceiveActionEffect;
             Game.OnUpdate -= Update;
             Game.OnNetworkMessageDelegate -= NetworkMessage;
+            AdvanceEpoch("module disabled", resetRttModel: true);
             ResetRuntimeState();
         }
 
@@ -363,6 +832,27 @@ namespace Tsunippy.Modules
                 if (ImGui.Checkbox("Learn Animation Locks", ref Config.LearnAnimationLocks))
                     Config.Save(checkModules: false);
                 PluginUI.SetItemTooltip("Learns per-action lock values from live server responses.\nDisable this if you want to freeze the current learned database.");
+
+                var profile = Config.Profile;
+                if (ImGui.BeginCombo("Profile", profile.ToString()))
+                {
+                    foreach (TsunippyProfile option in Enum.GetValues(typeof(TsunippyProfile)))
+                    {
+                        var selected = option == profile;
+                        if (ImGui.Selectable(option.ToString(), selected))
+                        {
+                            Config.Profile = option;
+                            RefreshRuntimeSettings();
+                            Config.Save(checkModules: false);
+                        }
+
+                        if (selected)
+                            ImGui.SetItemDefaultFocus();
+                    }
+
+                    ImGui.EndCombo();
+                }
+                PluginUI.SetItemTooltip("Safe is conservative, Balanced is the sane default, Aggressive is tighter,\nand Auto switches locally based on jitter and path-shift classification.");
 
                 if (ImGui.TreeNode("Advanced RTT Settings"))
                 {
@@ -414,8 +904,7 @@ namespace Tsunippy.Modules
                         Config.JKBeta = 0.25f;
                         Config.JKK = 2.0f;
                         Config.DynamicFloorScaling = 0.85f;
-                        rttEstimator.Reset();
-                        dynamicFloor.Reset();
+                        ResetRttModel();
                         Config.Save(checkModules: false);
                     }
 
@@ -482,15 +971,33 @@ namespace Tsunippy.Modules
         private void ResetRuntimeState()
         {
             rttEstimator.Reset();
+            dualRttEstimator.Reset();
             dynamicFloor.Reset();
             packetTracker.Reset();
+            predictions.Clear();
+            recentIssuedActions.Clear();
             isCasting = false;
             enableAnticheat = false;
             saveLearnedData = false;
             saveRuntimeStats = false;
+            wasBetweenAreas = false;
+            wasPlayerPresent = false;
+            safeModeActive = true;
             outOfCombatIdleTimer = 0f;
             pendingLearnedEntries = 0;
-            appliedAnimationLocks.Clear();
+            predictionMismatchStreak = 0;
+            observedOutlierStreak = 0;
+            pathShiftStreak = 0;
+            lastActionTick = 0;
+            lastPredictedTick = 0;
+            lastPredictedSequence = 0;
+            lastPredictedActionId = 0;
+            lastPredictedLock = 0f;
+            lastPredictedEpoch = 0;
+            lastTerritoryType = uint.MaxValue;
+            profileSettings = ProfileSettings.From(Config.Profile, ConnectionState.WarmingUp);
+            lastPredictionReason = "reset";
+            lastSafeModeReason = "runtime reset";
             LastRTT = 0f;
             LastCorrection = 0f;
             LastVarianceBuffer = 0f;
